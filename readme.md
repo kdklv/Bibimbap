@@ -47,5 +47,11 @@ A generative music playground where chaos meets melody. Create unpredictable sou
 - Modern browser with Web Audio API
 - JavaScript enabled
 
-## License
-MIT
+## Version History
+- **v.01**: Initial release with basic physics, audio, and visual interactions.
+- **v.02**: 
+  - Revised Tone.js synth setup (in tone-setup.js) for better audio management.
+  - Refined Matter.js obstacle and collision handling.
+  - Enhanced UI controls with a glass-like overlay and updated interactivity.
+  - Introduced a dedicated p5.js setup (p5-setup.js) for future improvements.
+  - Additional visual effects for a richer experience.
