@@ -8,52 +8,56 @@ const scales = {
 };
 
 
-// Create synths (now in a separate file)
+// Create synths with effects
 let melodySynth;
 let metalSynth;
 let membraneSynth;
 let pluckSynth;
+let reverb;
+let compressor;
 
 function setupTone() {
+    // Global effects to unify the sound palette
+    const reverb = new Tone.Reverb({ decay: 1.5, preDelay: 0.01 }).toDestination();
+    const compressor = new Tone.Compressor(-30, 3).toDestination();
+
+    // Sound 0: MelodySynth - Smooth sine wave
     melodySynth = new Tone.PolySynth(Tone.Synth, {
-        oscillator: { type: "triangle" },
-        envelope: { attack: 0.02, decay: 0.1, sustain: 0.3, release: 1 },
-    }).toDestination();
-
-    metalSynth = new Tone.MetalSynth({
-        frequency: 200,
-        envelope: { attack: 0.001, decay: 0.1, release: 0.2 },
-        harmonicity: 3.1,
-        modulationIndex: 16,
-        resonance: 4000,
-        octaves: 1.5,
-    }).toDestination();
-
-    membraneSynth = new Tone.MembraneSynth({
-        pitchDecay: 0.05,
-        octaves: 4,
         oscillator: { type: "sine" },
-        envelope: { attack: 0.001, decay: 0.4, sustain: 0.01, release: 1.4 },
-    }).toDestination();
+        envelope: { attack: 0.02, decay: 0.1, sustain: 0.3, release: 1 }
+    }).connect(reverb).connect(compressor);
 
-    pluckSynth = new Tone.PluckSynth({
-        attackNoise: 2,
-        dampening: 4000,
-        resonance: 0.7,
-    }).toDestination();
+    // Sound 1: MetalSynth - Replaced with bell-like FMSynth
+    metalSynth = new Tone.PolySynth(Tone.FMSynth, {
+        harmonicity: 2,
+        modulationIndex: 5,
+        oscillator: { type: "sine" },
+        envelope: { attack: 0.01, decay: 0.2, sustain: 0, release: 0.5 }
+    }).connect(reverb).connect(compressor);
+
+    // Sound 2: MembraneSynth - Kept as is, made polyphonic
+    membraneSynth = new Tone.PolySynth(Tone.MembraneSynth, {
+        pitchDecay: 0.05,
+        octaves: 2,
+        oscillator: { type: "sine" },
+        envelope: { attack: 0.001, decay: 0.4, sustain: 0.01, release: 1.4 }
+    }).connect(reverb).connect(compressor);
+
+    // Sound 3: PluckSynth - Replaced with triangle-based MonoSynth
+    pluckSynth = new Tone.PolySynth(Tone.MonoSynth, {
+        oscillator: { type: "triangle" },
+        envelope: { attack: 0.01, decay: 0.2, sustain: 0.1, release: 0.5 }
+    }).connect(reverb).connect(compressor);
 }
 
 function playParticleSound(particle, note, volume, soundType = null) {
-    if (!audioInitialized || Tone.getContext().state !== 'running') return;
+    if (!audioInitialized || Tone.getContext().state !== 'running') {
+        console.log('Audio not initialized or running');
+        return;
+    }
 
     const now = Tone.now();
-    if (now - lastSoundTime < MIN_SOUND_INTERVAL) return;
-
-    lastSoundTime = now;
-
-    if (soundType === null) {
-        soundType = particle.soundType;
-    }
+    console.log('Playing sound:', { note, volume, soundType }); // Add debug logging
 
     try {
         const playTime = now + 0.01;

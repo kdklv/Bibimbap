@@ -12,6 +12,8 @@ A generative music playground where chaos meets melody. Create unpredictable sou
 - **Physics-Driven Music** - Gravity and bounces influence the rhythm
 - **Interactive Chaos** - Manipulate obstacles to shape the musical flow
 - **Emergent Patterns** - Complex melodies from simple particle interactions
+- **Multi-Particle System** - Create complex patterns with simultaneous particles
+- **Advanced Obstacle Control** - Rotate and position obstacles with precision
 
 ## Controls
 
@@ -20,6 +22,8 @@ A generative music playground where chaos meets melody. Create unpredictable sou
 - Drag: Move obstacles
 - Double-click: Remove obstacle
 - Scroll: Rotate obstacle
+- Middle-click: Alternative rotation method
+- Right-click: Context menu for obstacle properties
 
 **Keyboard**
 - 1-5: Drop multiple particles
@@ -27,16 +31,24 @@ A generative music playground where chaos meets melody. Create unpredictable sou
 - C: Clear all
 - Arrow keys: Rotate selected
 
+
 **UI Elements**
 - Scale selector
 - Gravity control
 - Bounce adjustment
+- Sound preset selector
+- Volume control
+- Particle speed adjustment
 
 ## Tips for Chaos
 - Stack obstacles to create complex bounce patterns
 - Adjust gravity for different musical densities
 - Use multiple particles for layered chaos
 - Experiment with bounce values for varied rhythms
+- Use different particle colors for visual tracking
+- Combine rotation and positioning for intricate patterns
+- Create symmetric layouts with mirrored obstacles
+- Experiment with particle counts for density control
 
 ## Tech Stack
 - p5.js (Graphics)
@@ -55,3 +67,10 @@ A generative music playground where chaos meets melody. Create unpredictable sou
   - Enhanced UI controls with a glass-like overlay and updated interactivity.
   - Introduced a dedicated p5.js setup (p5-setup.js) for future improvements.
   - Additional visual effects for a richer experience.
+- **v.03**:
+  - Added multi-particle spawning system with number keys (1-5)
+  - Implemented obstacle rotation controls with scroll wheel and arrow keys
+  - Enhanced obstacle interaction with double-click removal feature
+  - Introduced randomization feature with 'R' key for quick scene changes
+  - Added 'C' key functionality for clearing all elements
+  - Improved UI with scale selector and gravity/bounce controls
