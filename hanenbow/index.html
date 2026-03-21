@@ -410,6 +410,7 @@
 
     function onDown(e) {
       e.preventDefault();
+      canvas.setPointerCapture(e.pointerId);
       const p = canvasPos(e);
       ptrs.set(e.pointerId, p);
       maxPointers = Math.max(maxPointers, ptrs.size);

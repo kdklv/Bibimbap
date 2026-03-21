@@ -429,6 +429,7 @@
     function setupInput() {
       canvas.addEventListener('pointerdown', e => {
         e.preventDefault();
+        canvas.setPointerCapture(e.pointerId);
         const pt = canvasPt(e);
         ptrDownPos  = pt;
         ptrMoved    = false;
