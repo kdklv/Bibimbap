@@ -10,7 +10,6 @@
   <canvas id="canvas"></canvas>
   <div class="begin-screen" id="begin">touch to begin</div>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
   <script src="../shared/audio.js"></script>
   <script src="../shared/pointer.js"></script>
   <script>
@@ -98,16 +97,60 @@
       cell.targetAngle += Math.PI / 2;   // cumulative — handles rapid clicks
     }
 
+    // ─── Audio ───────────────────────────────────────────────────────────────
+    let audioCtx  = null;
+    let convolver = null;
+    let masterOut = null;
+
+    function initAudio() {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      masterOut = audioCtx.createGain();
+      masterOut.gain.value = 0.7;
+      masterOut.connect(audioCtx.destination);
+
+      // Programmatic reverb impulse response
+      const sr  = audioCtx.sampleRate;
+      const len = Math.floor(sr * 2.5);
+      const buf = audioCtx.createBuffer(2, len, sr);
+      for (let c = 0; c < 2; c++) {
+        const ch = buf.getChannelData(c);
+        for (let i = 0; i < len; i++)
+          ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.0);
+      }
+      convolver = audioCtx.createConvolver();
+      convolver.buffer = buf;
+      const wetGain = audioCtx.createGain();
+      wetGain.gain.value = 0.38;
+      convolver.connect(wetGain);
+      wetGain.connect(masterOut);
+    }
+
+    function playNote(midi, attack = 0.04, decay = 0.5) {
+      if (!audioCtx) return;
+      const freq = 440 * Math.pow(2, (midi - 69) / 12);
+      const osc  = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const t = audioCtx.currentTime;
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.linearRampToValueAtTime(0.28, t + attack);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + attack + decay);
+      osc.connect(gain);
+      gain.connect(masterOut);
+      gain.connect(convolver);
+      osc.start(t);
+      osc.stop(t + attack + decay + 0.1);
+    }
+
     // ─── Plankton ────────────────────────────────────────────────────────────
     let plankton     = [];
     let pulses       = [];
-    let synths       = [];
     let currentScale = 'gamelan';
 
     function triggerNote(p) {
       const midi = Audio.noteFromY(p.row * CELL, ROWS * CELL, currentScale, 3);
-      try { synths[p.synthIndex].triggerAttackRelease(Audio.midiToNote(midi), '8n'); }
-      catch (_) {}
+      playNote(midi);
     }
 
     // Determine the next move for a plankton that just arrived at p.col/p.row.
@@ -549,16 +592,7 @@
     const beginEl = document.getElementById('begin');
 
     function begin() {
-      // Kick off AudioContext resume synchronously from user gesture — no await
-      Tone.start();
-      const reverb = new Tone.Reverb({ decay: 2.6, wet: 0.40 });
-      reverb.toDestination();
-      synths = Array.from({ length: 5 }, () =>
-        new Tone.Synth({
-          oscillator: { type: 'sine' },
-          envelope:   { attack: 0.04, decay: 0.14, sustain: 0, release: 2.4 },
-        }).connect(reverb)
-      );
+      initAudio();
 
       beginEl.style.opacity = '0';
       beginEl.style.pointerEvents = 'none';
