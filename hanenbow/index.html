@@ -610,7 +610,6 @@
     // ─── Begin gate ──────────────────────────────────────────────────────────
 
     const beginEl = document.getElementById('begin');
-    beginEl.style.pointerEvents = 'auto';
 
     async function begin() {
       await Audio.init();
@@ -643,7 +642,7 @@
       requestAnimationFrame(loop);
     }
 
-    beginEl.addEventListener('pointerdown', begin, { once: true });
+    document.addEventListener('pointerdown', begin, { once: true });
   </script>
 </body>
 </html>
