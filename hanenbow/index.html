@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>hanenbow</title>
+  <link rel="stylesheet" href="../shared/theme.css">
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div class="begin-screen" id="begin">touch to begin</div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+  <script src="../shared/audio.js"></script>
+  <script>
+    // ─── Canvas ──────────────────────────────────────────────────────────────
+    const canvas = document.getElementById('canvas');
+    let ctx, W, H;
+
+    function setupCanvas() {
+      const dpr  = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      W = rect.width;
+      H = rect.height;
+      canvas.width  = W * dpr;
+      canvas.height = H * dpr;
+      ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+    }
+
+    // ─── Data structures ─────────────────────────────────────────────────────
+
+    // Default leaf layout — cascade that keeps the ball bouncing
+    const LAYOUT = [
+      { xf: 0.20, yf: 0.30, a:  0.35, len: 90  },
+      { xf: 0.50, yf: 0.22, a:  0.00, len: 110 },
+      { xf: 0.80, yf: 0.30, a: -0.35, len: 90  },
+      { xf: 0.14, yf: 0.55, a:  0.28, len: 80  },
+      { xf: 0.43, yf: 0.51, a: -0.10, len: 95  },
+      { xf: 0.72, yf: 0.55, a: -0.28, len: 85  },
+      { xf: 0.36, yf: 0.76, a:  0.18, len: 88  },
+    ];
+
+    let leaves        = [];
+    let ball          = {};
+    let synth         = null;
+    let currentScale  = 'pentatonic';
+
+    function makeLeaf(x, y, angle, len) {
+      const clampedAngle = Math.max(-Math.PI / 3, Math.min(Math.PI / 3, angle));
+      const halfLen      = len !== undefined ? len : 60 + Math.random() * 60;
+      return {
+        x, y,                          // target position (pointer-controlled)
+        displayX: x, displayY: y,      // lerped toward x,y — physics uses these
+        angle: clampedAngle,
+        len:   halfLen,
+        dragging:     false,
+        dragOffsetX:  0,
+        dragOffsetY:  0,
+        velHistory:   [],              // last 4 {x,y,t} pointer positions
+        releaseVelX:  0,
+        releaseVelY:  0,
+        wobble:        0,               // transient angular displacement from collision
+        wobbleVel:     0,              // angular velocity of wobble
+        flashT:        -Infinity,      // timestamp of last ball hit
+        lastNoteTime:  -Infinity,      // for 80ms debounce
+        lastRotateTime:-Infinity,      // for angle indicator fade
+      };
+    }
+
+    function initLeaves() {
+      leaves = LAYOUT.map(d => makeLeaf(d.xf * W, d.yf * H, d.a, d.len));
+    }
+
+    function randomiseLeaves() {
+      for (const leaf of leaves) {
+        leaf.x          = leaf.len + 10 + Math.random() * (W - 2 * leaf.len - 20);
+        leaf.y          = 60 + Math.random() * (H * 0.82);
+        leaf.angle      = (Math.random() - 0.5) * (2 * Math.PI / 3);
+        leaf.releaseVelX = 0;
+        leaf.releaseVelY = 0;
+      }
+    }
+
+    function resetBall() {
+      ball.x          = W / 2;
+      ball.y          = H * 0.07;
+      ball.vx         = (Math.random() - 0.5) * 6;
+      ball.vy         = 1;
+      ball.r          = 8;
+      ball.trail      = [];
+      ball.stuckTimer = 0;
+    }
+
+    // ─── Physics ─────────────────────────────────────────────────────────────
+
+    // Effective angle = user angle + transient wobble, clamped to valid range.
+    function leafEffAngle(leaf) {
+      return Math.max(-Math.PI / 3, Math.min(Math.PI / 3, leaf.angle + leaf.wobble));
+    }
+
+    // Point-to-segment distance test. Uses leaf.displayX/Y (visual position).
+    function leafHit(b, leaf) {
+      const eff = leafEffAngle(leaf);
+      const ax = leaf.displayX - Math.cos(eff) * leaf.len;
+      const ay = leaf.displayY - Math.sin(eff) * leaf.len;
+      const bx = leaf.displayX + Math.cos(eff) * leaf.len;
+      const by = leaf.displayY + Math.sin(eff) * leaf.len;
+      const dx = bx - ax, dy = by - ay;
+      const t  = Math.max(0, Math.min(1,
+        ((b.x - ax) * dx + (b.y - ay) * dy) / (dx * dx + dy * dy)
+      ));
+      return Math.hypot(b.x - (ax + t * dx), b.y - (ay + t * dy)) < b.r + 3;
+    }
+
+    // Reflect ball velocity around the leaf's surface normal.
+    function reflect(b, leaf) {
+      const eff = leafEffAngle(leaf);
+      const nx  = -Math.sin(eff);
+      const ny  =  Math.cos(eff);
+      const dot = b.vx * nx + b.vy * ny;
+      b.vx -= 2 * dot * nx;
+      b.vy -= 2 * dot * ny;
+    }
+
+    // Push ball cleanly outside the leaf so it can't stick or tunnel.
+    function pushOut(b, leaf) {
+      const eff = leafEffAngle(leaf);
+      const ax = leaf.displayX - Math.cos(eff) * leaf.len;
+      const ay = leaf.displayY - Math.sin(eff) * leaf.len;
+      const bx = leaf.displayX + Math.cos(eff) * leaf.len;
+      const by = leaf.displayY + Math.sin(eff) * leaf.len;
+      const dx = bx - ax, dy = by - ay;
+      const t  = Math.max(0, Math.min(1,
+        ((b.x - ax) * dx + (b.y - ay) * dy) / (dx * dx + dy * dy)
+      ));
+      const cpx = ax + t * dx, cpy = ay + t * dy;
+      const ox  = b.x - cpx, oy = b.y - cpy;
+      const od  = Math.hypot(ox, oy) || 1;
+      const overlap = (b.r + 3) - od;
+      if (overlap > 0) {
+        b.x += (ox / od) * overlap;
+        b.y += (oy / od) * overlap;
+      }
+    }
+
+    function updateBall() {
+      // Gravity — non-negotiable
+      ball.vy += 0.25;
+
+      // Speed cap — non-negotiable
+      const spd = Math.hypot(ball.vx, ball.vy);
+      if (spd > 18) { ball.vx *= 18 / spd; ball.vy *= 18 / spd; }
+
+      ball.x += ball.vx;
+      ball.y += ball.vy;
+
+      // Wall bounce (silent)
+      if (ball.x < ball.r)       { ball.x = ball.r;       ball.vx *= -0.9; }
+      if (ball.x > W - ball.r)   { ball.x = W - ball.r;   ball.vx *= -0.9; }
+      if (ball.y < ball.r)       { ball.y = ball.r;        ball.vy *= -0.9; }
+      if (ball.y > H + 80)       { resetBall(); return; }
+
+      // Leaf collisions
+      for (const leaf of leaves) {
+        if (!leafHit(ball, leaf)) continue;
+        pushOut(ball, leaf);
+        reflect(ball, leaf);
+        ball.vx *= 1.05;   // small energy boost — non-negotiable, prevents dying
+        ball.vy *= 1.05;
+
+        // Angular impulse: hit near tip → more wobble than hit near centre
+        const eff  = leafEffAngle(leaf);
+        const hax  = leaf.displayX - Math.cos(eff) * leaf.len;
+        const hay  = leaf.displayY - Math.sin(eff) * leaf.len;
+        const hbx  = leaf.displayX + Math.cos(eff) * leaf.len;
+        const hby  = leaf.displayY + Math.sin(eff) * leaf.len;
+        const hdx  = hbx - hax, hdy = hby - hay;
+        const ht   = Math.max(0, Math.min(1,
+          ((ball.x - hax) * hdx + (ball.y - hay) * hdy) / (hdx * hdx + hdy * hdy)
+        ));
+        const leverArm    = (ht - 0.5) * 2;              // –1…+1, tip-to-tip
+        const hnx         = -Math.sin(eff), hny = Math.cos(eff);
+        const impactSpeed = Math.abs(ball.vx * hnx + ball.vy * hny);
+        leaf.wobbleVel   += leverArm * impactSpeed * 0.0022;
+
+        leaf.flashT = performance.now();
+        triggerLeafNote(leaf);
+      }
+
+      // Stuck detection
+      if (spd < 0.5) ball.stuckTimer++;
+      else           ball.stuckTimer = 0;
+      if (ball.stuckTimer > 120) resetBall();
+
+      // Trail
+      ball.trail.push({ x: ball.x, y: ball.y });
+      if (ball.trail.length > 20) ball.trail.shift();
+    }
+
+    function updateLeaves() {
+      for (const leaf of leaves) {
+        if (!leaf.dragging) {
+          // Apply release momentum (decays quickly)
+          const speed = Math.hypot(leaf.releaseVelX, leaf.releaseVelY);
+          if (speed > 0.05) {
+            leaf.x += leaf.releaseVelX;
+            leaf.y += leaf.releaseVelY;
+            leaf.releaseVelX *= 0.88;
+            leaf.releaseVelY *= 0.88;
+            leaf.x = Math.max(20, Math.min(W - 20, leaf.x));
+            leaf.y = Math.max(20, Math.min(H - 20, leaf.y));
+          }
+        }
+        // Wobble spring — springs back to 0, settles in ~0.5s
+        leaf.wobbleVel += -leaf.wobble * 0.18;
+        leaf.wobbleVel *= 0.80;
+        leaf.wobble    += leaf.wobbleVel;
+
+        // Lerp display toward target — this is the weighted feel (0.18 per spec)
+        leaf.displayX += (leaf.x - leaf.displayX) * 0.18;
+        leaf.displayY += (leaf.y - leaf.displayY) * 0.18;
+      }
+    }
+
+    // ─── Update ──────────────────────────────────────────────────────────────
+
+    function update() {
+      updateLeaves();   // display positions must be fresh before ball collision
+      updateBall();
+    }
+
+    // ─── Audio ───────────────────────────────────────────────────────────────
+
+    // Map leaf angle (–π/3 to +π/3) → note in current scale, 2 octaves.
+    function leafAngleToNote(leaf) {
+      const t      = (leaf.angle + Math.PI / 3) / (2 * Math.PI / 3);  // 0..1
+      const scale  = Audio.scales[currentScale];
+      const total  = scale.length * 2;
+      const idx    = Math.max(0, Math.min(total - 1, Math.floor(t * total)));
+      const octave = Math.floor(idx / scale.length);
+      const degree = scale[idx % scale.length];
+      return Audio.midiToNote(60 + octave * 12 + degree);
+    }
+
+    function triggerLeafNote(leaf) {
+      const now = performance.now();
+      if (now - leaf.lastNoteTime < 80) return;   // 80ms debounce
+      leaf.lastNoteTime = now;
+      try { synth.triggerAttackRelease(leafAngleToNote(leaf), '8n'); }
+      catch (_) {}
+    }
+
+    // ─── Draw ────────────────────────────────────────────────────────────────
+
+    function drawLeaf(leaf, now) {
+      const flash     = Math.max(0, 1 - (now - leaf.flashT) / 300);
+      const lightness = 22 + flash * 38;   // 22% rest → 60% full hit
+      const halfW     = 8  + flash * 6;    //  8px rest → 14px full hit
+
+      ctx.save();
+      ctx.translate(leaf.displayX, leaf.displayY);
+      ctx.rotate(leafEffAngle(leaf));
+
+      if (flash > 0.05) {
+        ctx.shadowBlur  = flash * 24;
+        ctx.shadowColor = `hsla(140, 70%, 65%, ${flash * 0.9})`;
+      }
+
+      ctx.fillStyle = `hsl(140, 38%, ${lightness}%)`;
+      ctx.beginPath();
+      // Spec: ctx.ellipse(0, 0, leaf.len, 8 + flash*6, 0, 0, Math.PI*2)
+      ctx.ellipse(0, 0, leaf.len, halfW, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.shadowBlur  = 0;
+      ctx.strokeStyle = `hsla(140, 35%, ${lightness + 14}%, 0.3)`;
+      ctx.lineWidth   = 0.8;
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    // Subtle arc showing current angle position within the rotatable range.
+    // Visible for 1s after any rotate event, then fades.
+    function drawAngleIndicator(leaf, now) {
+      const age = now - leaf.lastRotateTime;
+      if (age < 0 || age > 1000) return;
+
+      const fade = 1 - age / 1000;
+      const R    = 44;
+      const cx   = leaf.displayX;
+      const cy   = leaf.displayY;
+
+      ctx.save();
+
+      // Full rotatable range arc (mapped to the "up" sector around the leaf)
+      ctx.globalAlpha = fade * 0.28;
+      ctx.strokeStyle = '#a0c4ff';
+      ctx.lineWidth   = 1.5;
+      ctx.lineCap     = 'round';
+      ctx.beginPath();
+      ctx.arc(cx, cy, R, -Math.PI / 2 - Math.PI / 3, -Math.PI / 2 + Math.PI / 3);
+      ctx.stroke();
+
+      // Current angle — brighter radial tick
+      ctx.globalAlpha  = fade * 0.82;
+      ctx.lineWidth    = 2;
+      const iAngle     = -Math.PI / 2 + leaf.angle;   // 0 → straight up
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + Math.cos(iAngle) * R, cy + Math.sin(iAngle) * R);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    function drawBall() {
+      // Trail — fading polyline, 20 points
+      for (let i = 1; i < ball.trail.length; i++) {
+        const t = i / ball.trail.length;
+        ctx.save();
+        ctx.globalAlpha = t * 0.45;
+        ctx.strokeStyle = '#e8eaf0';
+        ctx.lineWidth   = t * 5;
+        ctx.lineCap     = 'round';
+        ctx.beginPath();
+        ctx.moveTo(ball.trail[i - 1].x, ball.trail[i - 1].y);
+        ctx.lineTo(ball.trail[i].x,     ball.trail[i].y);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Body — white, shadowBlur=24 per spec
+      ctx.save();
+      ctx.shadowBlur  = 24;
+      ctx.shadowColor = 'rgba(255, 255, 255, 0.85)';
+      ctx.fillStyle   = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function draw() {
+      const now = performance.now();
+
+      // Motion-blur persistence (Hanenbow uses this strategy per spec)
+      ctx.fillStyle = 'rgba(8, 12, 20, 0.25)';
+      ctx.fillRect(0, 0, W, H);
+
+      // Leaves (drawing order: leaves → indicators → ball, so ball is on top)
+      for (const leaf of leaves) drawLeaf(leaf, now);
+      for (const leaf of leaves) drawAngleIndicator(leaf, now);
+      drawBall();
+    }
+
+    // ─── Loop ────────────────────────────────────────────────────────────────
+
+    function loop() {
+      update();
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    // ─── Input ───────────────────────────────────────────────────────────────
+
+    const ptrs = new Map();   // pointerId → {x, y}  — all currently-active pointers
+
+    let dragLeaf     = null;
+    let dragPtrId    = null;
+    let rotateLeaf   = null;
+    let prevRotAngle = 0;
+    let maxPointers  = 0;     // peak simultaneous pointers in current gesture
+
+    let mouseX = 0, mouseY = 0;
+
+    // Double-tap state
+    let lastTapUpTime = 0;
+    let lastTapUpPos  = { x: 0, y: 0 };
+    let ptrDownPos    = { x: 0, y: 0 };
+
+    function canvasPos(e) {
+      const rect = canvas.getBoundingClientRect();
+      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    }
+
+    function nearestLeaf(px, py, maxDist) {
+      let best = null, bestDist = maxDist;
+      for (const leaf of leaves) {
+        const d = Math.hypot(px - leaf.displayX, py - leaf.displayY);
+        if (d < bestDist) { bestDist = d; best = leaf; }
+      }
+      return best;
+    }
+
+    // Returns angle of the vector between the two active pointers.
+    // Sorted by pointerId so the angle is consistent regardless of which moved.
+    function twoFingerAngle() {
+      const pts = [...ptrs.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(e => e[1]);
+      return Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
+    }
+
+    function twoFingerMid() {
+      const vals = [...ptrs.values()];
+      return { x: (vals[0].x + vals[1].x) / 2, y: (vals[0].y + vals[1].y) / 2 };
+    }
+
+    function onDown(e) {
+      e.preventDefault();
+      const p = canvasPos(e);
+      ptrs.set(e.pointerId, p);
+      maxPointers = Math.max(maxPointers, ptrs.size);
+
+      if (ptrs.size === 1) {
+        ptrDownPos = { ...p };
+
+        // Try to grab a leaf (44px hit radius per spec)
+        const leaf = nearestLeaf(p.x, p.y, 44);
+        if (leaf) {
+          dragLeaf           = leaf;
+          dragPtrId          = e.pointerId;
+          leaf.dragging      = true;
+          leaf.dragOffsetX   = leaf.x - p.x;
+          leaf.dragOffsetY   = leaf.y - p.y;
+          leaf.velHistory    = [];
+          leaf.releaseVelX   = 0;
+          leaf.releaseVelY   = 0;
+        }
+
+      } else if (ptrs.size === 2) {
+        // Second finger down: end any drag and switch to two-finger rotate
+        if (dragLeaf) {
+          endDrag(false);   // no release momentum when interrupted by second finger
+        }
+        const mid  = twoFingerMid();
+        rotateLeaf = nearestLeaf(mid.x, mid.y, 150);
+        if (rotateLeaf) {
+          prevRotAngle = twoFingerAngle();
+        }
+      }
+    }
+
+    function onMove(e) {
+      const p = canvasPos(e);
+      // Always track mouse position for wheel-rotate (works even without a press)
+      mouseX = p.x;
+      mouseY = p.y;
+
+      if (!ptrs.has(e.pointerId)) return;
+      ptrs.set(e.pointerId, p);
+
+      if (ptrs.size === 1 && dragLeaf && e.pointerId === dragPtrId) {
+        // Drag: update target position
+        dragLeaf.x = p.x + dragLeaf.dragOffsetX;
+        dragLeaf.y = p.y + dragLeaf.dragOffsetY;
+        dragLeaf.x = Math.max(20, Math.min(W - 20, dragLeaf.x));
+        dragLeaf.y = Math.max(20, Math.min(H - 20, dragLeaf.y));
+
+        // Velocity history: track raw pointer position for release momentum
+        dragLeaf.velHistory.push({ x: p.x, y: p.y, t: performance.now() });
+        if (dragLeaf.velHistory.length > 4) dragLeaf.velHistory.shift();
+
+      } else if (ptrs.size >= 2 && rotateLeaf) {
+        // Two-finger rotate: compute delta from last known angle
+        const newAngle = twoFingerAngle();
+        let delta = newAngle - prevRotAngle;
+
+        // Wrap delta to [–π, π] so we never spin the leaf backwards
+        if (delta >  Math.PI) delta -= Math.PI * 2;
+        if (delta < -Math.PI) delta += Math.PI * 2;
+
+        rotateLeaf.angle = Math.max(
+          -Math.PI / 3,
+          Math.min( Math.PI / 3, rotateLeaf.angle + delta)
+        );
+        rotateLeaf.lastRotateTime = performance.now();
+        prevRotAngle = newAngle;
+      }
+    }
+
+    function endDrag(applyMomentum) {
+      if (!dragLeaf) return;
+      if (applyMomentum) {
+        const h = dragLeaf.velHistory;
+        if (h.length >= 2) {
+          const dt = h[h.length - 1].t - h[0].t;
+          if (dt > 0) {
+            // Velocity in px/ms → scale to px/frame (~16.7ms), cap at 10px/frame
+            let vx = (h[h.length - 1].x - h[0].x) / dt * 16;
+            let vy = (h[h.length - 1].y - h[0].y) / dt * 16;
+            const mag = Math.hypot(vx, vy);
+            if (mag > 10) { vx *= 10 / mag; vy *= 10 / mag; }
+            dragLeaf.releaseVelX = vx;
+            dragLeaf.releaseVelY = vy;
+          }
+        }
+      }
+      dragLeaf.dragging = false;
+      dragLeaf  = null;
+      dragPtrId = null;
+    }
+
+    function onUp(e) {
+      const p          = canvasPos(e);
+      const wasMulti   = ptrs.size >= 2;
+
+      if (e.pointerId === dragPtrId) endDrag(true);
+      ptrs.delete(e.pointerId);
+      if (ptrs.size < 2) rotateLeaf = null;
+
+      // Double-tap detection — only on single-touch gestures where the finger
+      // didn't drag (moved < 12px from down position)
+      if (!wasMulti && ptrs.size === 0 && maxPointers === 1) {
+        const moved = Math.hypot(p.x - ptrDownPos.x, p.y - ptrDownPos.y);
+        if (moved < 12) {
+          const now = performance.now();
+          if (
+            now - lastTapUpTime < 350 &&
+            Math.hypot(p.x - lastTapUpPos.x, p.y - lastTapUpPos.y) < 44
+          ) {
+            handleDoubleClick(p.x, p.y);
+            lastTapUpTime = 0;   // reset so triple-tap doesn't double-trigger
+          } else {
+            lastTapUpTime = now;
+            lastTapUpPos  = { ...p };
+          }
+        }
+      }
+
+      if (ptrs.size === 0) maxPointers = 0;
+    }
+
+    function onWheel(e) {
+      e.preventDefault();
+      const leaf = nearestLeaf(mouseX, mouseY, 120);
+      if (!leaf) return;
+      leaf.angle = Math.max(
+        -Math.PI / 3,
+        Math.min( Math.PI / 3, leaf.angle + e.deltaY * 0.002)
+      );
+      leaf.lastRotateTime = performance.now();
+    }
+
+    function handleDoubleClick(x, y) {
+      const leaf = nearestLeaf(x, y, 50);
+      if (leaf) {
+        // Remove leaf (min 2 leaves)
+        if (leaves.length > 2) {
+          leaves.splice(leaves.indexOf(leaf), 1);
+        }
+      } else {
+        // Add leaf at click position (max 12)
+        if (leaves.length < 12) {
+          leaves.push(makeLeaf(x, y, (Math.random() - 0.5) * Math.PI / 3));
+        }
+      }
+    }
+
+    function setupInput() {
+      canvas.addEventListener('pointerdown',   onDown);
+      canvas.addEventListener('pointermove',   onMove);
+      canvas.addEventListener('pointerup',     onUp);
+      canvas.addEventListener('pointercancel', onUp);
+      canvas.addEventListener('wheel', onWheel, { passive: false });
+    }
+
+    // ─── Keyboard ────────────────────────────────────────────────────────────
+
+    function setupKeyboard() {
+      document.addEventListener('keydown', e => {
+        switch (e.code) {
+          case 'KeyR':
+            e.preventDefault();
+            resetBall();
+            break;
+          case 'Space':
+            e.preventDefault();
+            randomiseLeaves();
+            break;
+          case 'KeyC':
+            initLeaves();
+            break;
+          case 'Digit1': currentScale = 'gamelan';    break;
+          case 'Digit2': currentScale = 'pentatonic'; break;
+          case 'Digit3': currentScale = 'wholeTone';  break;
+          case 'Digit4': currentScale = 'major';      break;
+          case 'Digit5': currentScale = 'minor';      break;
+        }
+      });
+    }
+
+    // ─── Resize ──────────────────────────────────────────────────────────────
+
+    function onResize() {
+      if (!W || !H) return;
+      const scaleX = canvas.getBoundingClientRect().width  / W;
+      const scaleY = canvas.getBoundingClientRect().height / H;
+      setupCanvas();
+      for (const leaf of leaves) {
+        leaf.x        *= scaleX; leaf.displayX *= scaleX;
+        leaf.y        *= scaleY; leaf.displayY *= scaleY;
+      }
+      if (ball.x > W || ball.y > H + 80) resetBall();
+    }
+
+    // ─── Begin gate ──────────────────────────────────────────────────────────
+
+    const beginEl = document.getElementById('begin');
+    beginEl.style.pointerEvents = 'auto';
+
+    async function begin() {
+      await Audio.init();
+
+      // Reverb IR generates in the background — ready well before the first
+      // leaf hit since the user has to interact after the begin screen fades.
+      const reverb = new Tone.Reverb({ decay: 1.8, wet: 0.34 });
+      reverb.toDestination();
+
+      // Sine + fast attack + medium decay + zero sustain = kalimba / thumb piano.
+      // Completely organic character — no noise burst, no Karplus-Strong artifacts.
+      // The ball bouncing off a leaf now sounds like striking a soft bar.
+      synth = new Tone.Synth({
+        oscillator: { type: 'sine' },
+        envelope:   { attack: 0.001, decay: 0.55, sustain: 0, release: 2.0 },
+        volume:     -5,
+      }).connect(reverb);
+
+      beginEl.style.opacity      = '0';
+      beginEl.style.pointerEvents = 'none';
+      setTimeout(() => beginEl.remove(), 700);
+
+      setupCanvas();
+      initLeaves();
+      resetBall();
+      setupInput();
+      setupKeyboard();
+      window.addEventListener('resize', onResize);
+
+      requestAnimationFrame(loop);
+    }
+
+    beginEl.addEventListener('pointerdown', begin, { once: true });
+  </script>
+</body>
+</html>

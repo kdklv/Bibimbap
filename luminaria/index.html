@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>luminaria</title>
+  <link rel="stylesheet" href="../shared/theme.css">
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div class="begin-screen" id="begin">touch to begin</div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+  <script src="../shared/audio.js"></script>
+  <script src="../shared/pointer.js"></script>
+  <script>
+    // ─── Canvas ──────────────────────────────────────────────────────────────
+    const canvas = document.getElementById('canvas');
+    let ctx, W, H;
+
+    function setupCanvas() {
+      const dpr  = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      W = rect.width;
+      H = rect.height;
+      canvas.width  = W * dpr;
+      canvas.height = H * dpr;
+      ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+    }
+
+    // ─── Grid ────────────────────────────────────────────────────────────────
+    let grid = [];
+    let CELL, COLS, ROWS, offsetX, offsetY;
+    let BPM  = 90;
+    let SPEED;                       // px/frame, recomputed on BPM / CELL change
+
+    function recomputeSpeed() {
+      const beatFrames = (60 / BPM) * 60;
+      SPEED = CELL / beatFrames;
+    }
+
+    const DIR_ANGLES = { N: -Math.PI / 2, E: 0, S: Math.PI / 2, W: Math.PI };
+    const DIR_DELTAS = { N: [0, -1], E: [1, 0], S: [0, 1], W: [-1, 0] };
+
+    function randomDir(row, col) {
+      const dirs = ['N', 'E', 'S', 'W'];
+      const biased = pref => Math.random() < 0.7 ? pref : dirs[Math.floor(Math.random() * 4)];
+      if (row === 0)        return biased('S');
+      if (row === ROWS - 1) return biased('N');
+      if (col === 0)        return biased('E');
+      if (col === COLS - 1) return biased('W');
+      return dirs[Math.floor(Math.random() * 4)];
+    }
+
+    function initGrid() {
+      CELL = window.innerWidth < 768 ? 60 : 80;
+      recomputeSpeed();
+      COLS    = Math.floor(W / CELL);
+      ROWS    = Math.floor(H / CELL);
+      offsetX = (W - COLS * CELL) / 2;
+      offsetY = (H - ROWS * CELL) / 2;
+      grid = Array.from({ length: ROWS }, (_, row) =>
+        Array.from({ length: COLS }, (_, col) => {
+          const dir   = randomDir(row, col);
+          const angle = DIR_ANGLES[dir];
+          return { dir, animAngle: angle, targetAngle: angle };
+        })
+      );
+    }
+
+    function cellCenter(col, row) {
+      return {
+        x: offsetX + col * CELL + CELL / 2,
+        y: offsetY + row * CELL + CELL / 2,
+      };
+    }
+
+    function randomiseGrid() {
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          const dir     = randomDir(r, c);
+          grid[r][c].dir = dir;
+          // Rotate by the shortest path from current displayed angle to target
+          const current = Math.round(grid[r][c].animAngle / (Math.PI / 2));
+          const target  = DIR_ANGLES[dir] / (Math.PI / 2);
+          const steps   = ((target - current) % 4 + 4) % 4;
+          grid[r][c].targetAngle = grid[r][c].animAngle + steps * Math.PI / 2;
+        }
+      }
+    }
+
+    // ─── Cell click ──────────────────────────────────────────────────────────
+    function onCellClick(col, row) {
+      const dirs = ['N', 'E', 'S', 'W'];
+      const cell = grid[row][col];
+      cell.dir         = dirs[(dirs.indexOf(cell.dir) + 1) % 4];
+      cell.targetAngle += Math.PI / 2;   // cumulative — handles rapid clicks
+    }
+
+    // ─── Plankton ────────────────────────────────────────────────────────────
+    let plankton     = [];
+    let pulses       = [];
+    let synths       = [];
+    let currentScale = 'gamelan';
+
+    function triggerNote(p) {
+      const midi = Audio.noteFromY(p.row * CELL, ROWS * CELL, currentScale, 3);
+      try { synths[p.synthIndex].triggerAttackRelease(Audio.midiToNote(midi), '8n'); }
+      catch (_) {}
+    }
+
+    // Determine the next move for a plankton that just arrived at p.col/p.row.
+    function advancePlankton(p) {
+      const dir = grid[p.row][p.col].dir;
+      const [dc, dr] = DIR_DELTAS[dir];
+      const nc = p.col + dc;
+      const nr = p.row + dr;
+
+      if (nc < 0 || nc >= COLS || nr < 0 || nr >= ROWS) {
+        p.state = 'fading';
+        return;
+      }
+      if (p.visitedCells.has(`${nc},${nr}`)) {
+        p.state = 'fading';
+        return;
+      }
+
+      p.targetCol = nc;
+      p.targetRow = nr;
+      const c     = cellCenter(nc, nr);
+      p.targetX   = c.x;
+      p.targetY   = c.y;
+    }
+
+    // Spawn a floating idle plankton — drifts freely, tap to activate into the grid
+    function spawnIdlePlankton() {
+      if (plankton.length >= 5) return;
+      const margin = 50;
+      const ox = margin + Math.random() * (W - margin * 2);
+      const oy = margin + Math.random() * (H - margin * 2);
+      plankton.push({
+        x: ox, y: oy,
+        idleOriginX: ox, idleOriginY: oy,
+        idleT:      Math.random() * Math.PI * 2,
+        idlePhase:  Math.random() * Math.PI * 2,
+        idleRadius: 22 + Math.random() * 28,
+        trail: [],
+        hue: Math.random() * 360,
+        state: 'idle',
+        opacity: 1.0,
+        synthIndex: -1,
+        dragging: false,
+      });
+    }
+
+    // Snap idle plankton to nearest grid cell and start it moving
+    function activatePlankton(p) {
+      const col = Math.max(0, Math.min(COLS - 1, Math.floor((p.x - offsetX) / CELL)));
+      const row = Math.max(0, Math.min(ROWS - 1, Math.floor((p.y - offsetY) / CELL)));
+      const usedIdx = new Set(plankton.filter(q => q.state === 'alive').map(q => q.synthIndex));
+      let synthIndex = 0;
+      while (usedIdx.has(synthIndex)) synthIndex++;
+      const c = cellCenter(col, row);
+      p.x = c.x; p.y = c.y;
+      p.col = col; p.row = row;
+      p.targetCol = col; p.targetRow = row;
+      p.targetX = c.x; p.targetY = c.y;
+      p.visitedCells = new Set([`${col},${row}`]);
+      p.state = 'alive';
+      p.opacity = 1.0;
+      p.trail = [];
+      p.synthIndex = synthIndex;
+      advancePlankton(p);
+    }
+
+    function updatePlankton(p, now) {
+      if (p.dragging) return;   // position controlled by pointer
+      if (p.state === 'idle') {
+        p.idleT += 0.006;
+        p.x = p.idleOriginX + Math.cos(p.idleT + p.idlePhase) * p.idleRadius;
+        p.y = p.idleOriginY + Math.sin(p.idleT * 0.7 + p.idlePhase) * p.idleRadius * 0.55;
+        // Soft boundary — nudge origin back if it drifts near edges
+        const m = 30;
+        if (p.x < m) p.idleOriginX += 0.3;
+        if (p.x > W - m) p.idleOriginX -= 0.3;
+        if (p.y < m) p.idleOriginY += 0.3;
+        if (p.y > H - m) p.idleOriginY -= 0.3;
+        return;
+      }
+      if (p.state === 'fading') {
+        p.opacity -= 0.018;
+        if (p.opacity <= 0) p.state = 'dead';
+        return;
+      }
+
+      // Record trail position
+      p.trail.push({ x: p.x, y: p.y });
+      if (p.trail.length > 80) p.trail.shift();
+
+      const dx   = p.targetX - p.x;
+      const dy   = p.targetY - p.y;
+      const dist = Math.hypot(dx, dy);
+
+      if (dist < 2) {
+        // Snap to cell center
+        p.x   = p.targetX;
+        p.y   = p.targetY;
+        p.col = p.targetCol;
+        p.row = p.targetRow;
+
+        p.visitedCells.add(`${p.col},${p.row}`);
+        triggerNote(p);
+        pulses.push({ col: p.col, row: p.row, startTime: now });
+        advancePlankton(p);
+      } else {
+        p.x += (dx / dist) * SPEED;
+        p.y += (dy / dist) * SPEED;
+      }
+    }
+
+    // ─── Draw ────────────────────────────────────────────────────────────────
+    const ARROW_SIZE = 0.22;   // fraction of CELL
+
+    function drawArrow(col, row, occupied) {
+      const cell = grid[row][col];
+      const c    = cellCenter(col, row);
+      const sz   = CELL * ARROW_SIZE;
+
+      ctx.save();
+      ctx.translate(c.x, c.y);
+      ctx.rotate(cell.animAngle);
+      // Arrows are navigational hints only — the light trails are the main visual
+      ctx.globalAlpha  = occupied ? 0.65 : 0.07;
+
+      if (occupied) {
+        ctx.shadowBlur  = 18;
+        ctx.shadowColor = 'rgba(160,196,255,0.9)';
+      }
+
+      ctx.strokeStyle = '#a0c4ff';
+      ctx.lineWidth   = occupied ? 2 : 1.2;
+      ctx.lineCap     = 'round';
+      ctx.lineJoin    = 'round';
+
+      // Simple chevron arrow pointing right (rotated by animAngle)
+      ctx.beginPath();
+      ctx.moveTo(-sz, -sz * 0.55);
+      ctx.lineTo(sz,  0);
+      ctx.lineTo(-sz,  sz * 0.55);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    function draw(now) {
+      // 1. Very slow fade — trails persist long enough to build geometric patterns
+      ctx.fillStyle = 'rgba(8,12,20,0.12)';
+      ctx.fillRect(0, 0, W, H);
+
+      // 2. Grid arrows
+      const occupiedSet = new Set(
+        plankton.filter(p => p.state === 'alive').map(p => `${p.col},${p.row}`)
+      );
+
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          drawArrow(c, r, occupiedSet.has(`${c},${r}`));
+        }
+      }
+
+      // 3. Cell pulses
+      for (const pulse of pulses) {
+        const t = (now - pulse.startTime) / 400;
+        if (t >= 1) continue;
+        const c  = cellCenter(pulse.col, pulse.row);
+        const r  = (CELL * 0.48) * t;
+        ctx.save();
+        ctx.globalAlpha  = (1 - t) * 0.6;
+        ctx.strokeStyle  = '#a0c4ff';
+        ctx.lineWidth    = 1.5;
+        ctx.shadowBlur   = 8;
+        ctx.shadowColor  = 'rgba(160,196,255,0.5)';
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // 4. Trails — two passes: soft glow halo then sharp luminous core.
+      //    No shadowBlur per segment (80 pts × 5 plankton would kill perf).
+      //    The width+alpha combination reads as a glow at normal viewing distance.
+      ctx.lineCap  = 'round';
+      ctx.lineJoin = 'round';
+      for (const p of plankton) {
+        if (p.trail.length < 2) continue;
+        ctx.save();
+        ctx.globalAlpha = p.opacity;
+
+        // Pass 1: wide soft halo
+        for (let i = 1; i < p.trail.length; i++) {
+          const t = i / p.trail.length;
+          ctx.strokeStyle = `hsla(${p.hue},100%,58%,${t * 0.16})`;
+          ctx.lineWidth   = 10 + t * 8;
+          ctx.beginPath();
+          ctx.moveTo(p.trail[i - 1].x, p.trail[i - 1].y);
+          ctx.lineTo(p.trail[i].x,     p.trail[i].y);
+          ctx.stroke();
+        }
+
+        // Pass 2: thin bright core
+        for (let i = 1; i < p.trail.length; i++) {
+          const t = i / p.trail.length;
+          ctx.strokeStyle = `hsla(${p.hue},100%,82%,${t * 0.92})`;
+          ctx.lineWidth   = 1.6;
+          ctx.beginPath();
+          ctx.moveTo(p.trail[i - 1].x, p.trail[i - 1].y);
+          ctx.lineTo(p.trail[i].x,     p.trail[i].y);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      // 5a. Idle plankton — pulsing ring + dim dot to suggest "tappable"
+      for (const p of plankton) {
+        if (p.state !== 'idle') continue;
+        const pulse = 0.5 + 0.5 * Math.sin(now * 0.0022 + p.idlePhase);
+        ctx.save();
+        // outer ring
+        ctx.globalAlpha = 0.18 + pulse * 0.20;
+        ctx.strokeStyle = `hsl(${p.hue},70%,65%)`;
+        ctx.lineWidth   = 1;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 9 + pulse * 5, 0, Math.PI * 2);
+        ctx.stroke();
+        // body dot
+        ctx.globalAlpha = 0.35 + pulse * 0.35;
+        ctx.shadowBlur  = 14;
+        ctx.shadowColor = `hsla(${p.hue},100%,75%,0.7)`;
+        ctx.fillStyle   = `hsl(${p.hue},100%,82%)`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // 5b. Active plankton bodies — vivid neon dot with strong glow
+      for (const p of plankton) {
+        if (p.state === 'dead' || p.state === 'idle') continue;
+        ctx.save();
+        ctx.globalAlpha  = p.opacity;
+        ctx.shadowBlur   = 28;
+        ctx.shadowColor  = `hsla(${p.hue},100%,75%,0.95)`;
+        ctx.fillStyle    = `hsl(${p.hue},100%,88%)`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    // ─── Update ──────────────────────────────────────────────────────────────
+    function update(now) {
+      // Animate grid arrows
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          const cell = grid[r][c];
+          cell.animAngle += (cell.targetAngle - cell.animAngle) * 0.2;
+        }
+      }
+
+      // Plankton
+      for (const p of plankton) updatePlankton(p, now);
+      plankton = plankton.filter(p => p.state !== 'dead');
+
+      // Expire pulses
+      pulses = pulses.filter(pulse => now - pulse.startTime < 400);
+
+      // Keep pool topped up with idle plankton so there's always something to tap
+      while (plankton.length < 5) spawnIdlePlankton();
+    }
+
+    // ─── Loop ────────────────────────────────────────────────────────────────
+    function loop(now) {
+      update(now);
+      draw(now);
+      requestAnimationFrame(loop);
+    }
+
+    // ─── Input ───────────────────────────────────────────────────────────────
+
+    let dragPlankton = null;
+    let ptrDownPos   = { x: 0, y: 0 };
+    let ptrDownCell  = null;
+    let ptrMoved     = false;
+
+    function canvasPt(e) {
+      const r = canvas.getBoundingClientRect();
+      return { x: e.clientX - r.left, y: e.clientY - r.top };
+    }
+
+    function nearestActivePlankton(px, py, maxDist) {
+      let best = null, bestDist = maxDist;
+      for (const p of plankton) {
+        if (p.state !== 'alive') continue;
+        const d = Math.hypot(px - p.x, py - p.y);
+        if (d < bestDist) { bestDist = d; best = p; }
+      }
+      return best;
+    }
+
+    function nearestIdlePlankton(px, py, maxDist) {
+      let best = null, bestDist = maxDist;
+      for (const p of plankton) {
+        if (p.state !== 'idle') continue;
+        const d = Math.hypot(px - p.x, py - p.y);
+        if (d < bestDist) { bestDist = d; best = p; }
+      }
+      return best;
+    }
+
+    function gridCell(px, py) {
+      const col = Math.floor((px - offsetX) / CELL);
+      const row = Math.floor((py - offsetY) / CELL);
+      if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return null;
+      return { col, row };
+    }
+
+    function setupInput() {
+      canvas.addEventListener('pointerdown', e => {
+        e.preventDefault();
+        const pt = canvasPt(e);
+        ptrDownPos  = pt;
+        ptrMoved    = false;
+        ptrDownCell = gridCell(pt.x, pt.y);
+
+        // Grab active plankton first, then idle — both are draggable
+        const grab = nearestActivePlankton(pt.x, pt.y, 28)
+                  || nearestIdlePlankton(pt.x, pt.y, 40);
+        if (grab) {
+          dragPlankton = grab;
+          grab.dragging = true;
+          grab.trail = [];
+          return;
+        }
+      });
+
+      canvas.addEventListener('pointermove', e => {
+        const pt = canvasPt(e);
+        if (Math.hypot(pt.x - ptrDownPos.x, pt.y - ptrDownPos.y) > 9) {
+          ptrMoved = true;
+          tapIdlePlankton = null;   // cancel idle tap if it became a drag
+        }
+        if (dragPlankton) {
+          dragPlankton.x = pt.x;
+          dragPlankton.y = pt.y;
+        }
+      });
+
+      const finishDrag = e => {
+        if (dragPlankton) {
+          dragPlankton.dragging = false;
+          if (dragPlankton.state === 'idle') {
+            // Release idle plankton → snap to grid and activate
+            activatePlankton(dragPlankton);
+          } else {
+            // Reposition active plankton → snap and restart from new cell
+            const col = Math.max(0, Math.min(COLS - 1, Math.floor((dragPlankton.x - offsetX) / CELL)));
+            const row = Math.max(0, Math.min(ROWS - 1, Math.floor((dragPlankton.y - offsetY) / CELL)));
+            const c   = cellCenter(col, row);
+            dragPlankton.x         = c.x;
+            dragPlankton.y         = c.y;
+            dragPlankton.col       = col;
+            dragPlankton.row       = row;
+            dragPlankton.targetCol = col;
+            dragPlankton.targetRow = row;
+            dragPlankton.targetX   = c.x;
+            dragPlankton.targetY   = c.y;
+            dragPlankton.visitedCells = new Set([`${col},${row}`]);
+            dragPlankton.state     = 'alive';
+            dragPlankton.opacity   = 1.0;
+            dragPlankton.trail     = [];
+            advancePlankton(dragPlankton);
+          }
+          dragPlankton = null;
+          return;
+        }
+
+        // Tap on empty grid cell → rotate its arrow
+        if (!ptrMoved && ptrDownCell) {
+          onCellClick(ptrDownCell.col, ptrDownCell.row);
+        }
+        ptrDownCell = null;
+      };
+
+      canvas.addEventListener('pointerup',     finishDrag);
+      canvas.addEventListener('pointercancel', () => {
+        if (dragPlankton) { dragPlankton.dragging = false; dragPlankton = null; }
+      });
+    }
+
+    document.addEventListener('keydown', e => {
+      switch (e.code) {
+        case 'Space': {
+          e.preventDefault();
+          // Activate a random idle plankton, or add a new idle one if pool isn't full
+          const idle = plankton.filter(p => p.state === 'idle');
+          if (idle.length > 0) {
+            activatePlankton(idle[Math.floor(Math.random() * idle.length)]);
+          } else {
+            spawnIdlePlankton();
+          }
+          break;
+        }
+        case 'KeyC':
+          // Clear active plankton; idle ones replenish on next update
+          plankton = plankton.filter(p => p.state === 'idle');
+          break;
+        case 'KeyR':
+          randomiseGrid();
+          break;
+        case 'Digit1': currentScale = 'gamelan';    break;
+        case 'Digit2': currentScale = 'pentatonic'; break;
+        case 'Digit3': currentScale = 'wholeTone';  break;
+        case 'Digit4': currentScale = 'major';      break;
+        case 'Digit5': currentScale = 'minor';      break;
+        case 'ArrowUp':
+          e.preventDefault();
+          BPM = Math.min(200, BPM + 10);
+          recomputeSpeed();
+          break;
+        case 'ArrowDown':
+          e.preventDefault();
+          BPM = Math.max(30, BPM - 10);
+          recomputeSpeed();
+          break;
+      }
+    });
+
+    window.addEventListener('resize', () => {
+      setupCanvas();
+      initGrid();
+      plankton = [];
+      pulses   = [];
+    });
+
+    // ─── Begin gate ──────────────────────────────────────────────────────────
+    const beginEl = document.getElementById('begin');
+    beginEl.style.pointerEvents = 'auto';
+
+    async function begin() {
+      await Audio.init();
+
+      // Reverb IR generates in the background — no await needed here because
+      // notes don't play until plankton spawn, which is after the begin screen
+      // fades (~700ms), giving the IR plenty of time to build.
+      const reverb = new Tone.Reverb({ decay: 2.6, wet: 0.40 });
+      reverb.toDestination();
+
+      // Pure sine + zero sustain = bell / marimba decay — organic and harmonic.
+      // sustain:0 means every note fades out like a real acoustic instrument
+      // rather than holding an electronic tone.
+      synths = Array.from({ length: 5 }, () =>
+        new Tone.Synth({
+          oscillator: { type: 'sine' },
+          envelope:   { attack: 0.04, decay: 0.14, sustain: 0, release: 2.4 },
+        }).connect(reverb)
+      );
+
+      beginEl.style.opacity = '0';
+      beginEl.style.pointerEvents = 'none';
+      setTimeout(() => beginEl.remove(), 700);
+
+      setupCanvas();
+      initGrid();
+      setupInput();
+
+      // Spawn idle plankton so the canvas has life immediately on begin
+      for (let i = 0; i < 5; i++) spawnIdlePlankton();
+      requestAnimationFrame(loop);
+    }
+
+    beginEl.addEventListener('pointerdown', begin, { once: true });
+  </script>
+</body>
+</html>
