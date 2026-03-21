@@ -97,35 +97,42 @@
       cell.targetAngle += Math.PI / 2;   // cumulative — handles rapid clicks
     }
 
-    // ─── Audio ───────────────────────────────────────────────────────────────
+    // ─── Plankton ────────────────────────────────────────────────────────────
+    let plankton     = [];
+    let pulses       = [];
+    let currentScale = 'gamelan';
+
+    // ─── Audio (Web Audio API — works reliably on iOS) ───────────────────────
     let audioCtx  = null;
     let convolver = null;
     let masterOut = null;
 
     function initAudio() {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      audioCtx.resume();   // explicit resume inside user-gesture = iOS-safe
+
       masterOut = audioCtx.createGain();
-      masterOut.gain.value = 0.7;
+      masterOut.gain.value = 0.72;
       masterOut.connect(audioCtx.destination);
 
       // Programmatic reverb impulse response
       const sr  = audioCtx.sampleRate;
-      const len = Math.floor(sr * 2.5);
+      const len = Math.floor(sr * 2.4);
       const buf = audioCtx.createBuffer(2, len, sr);
       for (let c = 0; c < 2; c++) {
         const ch = buf.getChannelData(c);
         for (let i = 0; i < len; i++)
-          ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.0);
+          ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.2);
       }
       convolver = audioCtx.createConvolver();
       convolver.buffer = buf;
-      const wetGain = audioCtx.createGain();
-      wetGain.gain.value = 0.38;
-      convolver.connect(wetGain);
-      wetGain.connect(masterOut);
+      const wet = audioCtx.createGain();
+      wet.gain.value = 0.38;
+      convolver.connect(wet);
+      wet.connect(masterOut);
     }
 
-    function playNote(midi, attack = 0.04, decay = 0.5) {
+    function playNote(midi, attack, decay, vol) {
       if (!audioCtx) return;
       const freq = 440 * Math.pow(2, (midi - 69) / 12);
       const osc  = audioCtx.createOscillator();
@@ -134,7 +141,7 @@
       osc.frequency.value = freq;
       const t = audioCtx.currentTime;
       gain.gain.setValueAtTime(0.0001, t);
-      gain.gain.linearRampToValueAtTime(0.28, t + attack);
+      gain.gain.linearRampToValueAtTime(vol, t + attack);
       gain.gain.exponentialRampToValueAtTime(0.0001, t + attack + decay);
       osc.connect(gain);
       gain.connect(masterOut);
@@ -143,14 +150,9 @@
       osc.stop(t + attack + decay + 0.1);
     }
 
-    // ─── Plankton ────────────────────────────────────────────────────────────
-    let plankton     = [];
-    let pulses       = [];
-    let currentScale = 'gamelan';
-
     function triggerNote(p) {
       const midi = Audio.noteFromY(p.row * CELL, ROWS * CELL, currentScale, 3);
-      playNote(midi);
+      playNote(midi, 0.04, 0.4, 0.28);
     }
 
     // Determine the next move for a plankton that just arrived at p.col/p.row.
@@ -493,7 +495,7 @@
         const pt = canvasPt(e);
         if (Math.hypot(pt.x - ptrDownPos.x, pt.y - ptrDownPos.y) > 9) {
           ptrMoved = true;
-          tapIdlePlankton = null;   // cancel idle tap if it became a drag
+
         }
         if (dragPlankton) {
           dragPlankton.x = pt.x;
