@@ -549,24 +549,7 @@
     const beginEl = document.getElementById('begin');
 
     async function begin() {
-      await Audio.init();
-
-      // Reverb IR generates in the background — no await needed here because
-      // notes don't play until plankton spawn, which is after the begin screen
-      // fades (~700ms), giving the IR plenty of time to build.
-      const reverb = new Tone.Reverb({ decay: 2.6, wet: 0.40 });
-      reverb.toDestination();
-
-      // Pure sine + zero sustain = bell / marimba decay — organic and harmonic.
-      // sustain:0 means every note fades out like a real acoustic instrument
-      // rather than holding an electronic tone.
-      synths = Array.from({ length: 5 }, () =>
-        new Tone.Synth({
-          oscillator: { type: 'sine' },
-          envelope:   { attack: 0.04, decay: 0.14, sustain: 0, release: 2.4 },
-        }).connect(reverb)
-      );
-
+      // Dismiss screen and start loop immediately — don't block on audio init
       beginEl.style.opacity = '0';
       beginEl.style.pointerEvents = 'none';
       setTimeout(() => beginEl.remove(), 700);
@@ -574,10 +557,21 @@
       setupCanvas();
       initGrid();
       setupInput();
-
-      // Spawn idle plankton so the canvas has life immediately on begin
       for (let i = 0; i < 5; i++) spawnIdlePlankton();
       requestAnimationFrame(loop);
+
+      // Audio init runs after visuals are live — ready well before first note
+      try {
+        await Audio.init();
+        const reverb = new Tone.Reverb({ decay: 2.6, wet: 0.40 });
+        reverb.toDestination();
+        synths = Array.from({ length: 5 }, () =>
+          new Tone.Synth({
+            oscillator: { type: 'sine' },
+            envelope:   { attack: 0.04, decay: 0.14, sustain: 0, release: 2.4 },
+          }).connect(reverb)
+        );
+      } catch (_) {}
     }
 
     document.addEventListener('pointerdown', begin, { once: true });

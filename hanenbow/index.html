@@ -612,22 +612,7 @@
     const beginEl = document.getElementById('begin');
 
     async function begin() {
-      await Audio.init();
-
-      // Reverb IR generates in the background — ready well before the first
-      // leaf hit since the user has to interact after the begin screen fades.
-      const reverb = new Tone.Reverb({ decay: 1.8, wet: 0.34 });
-      reverb.toDestination();
-
-      // Sine + fast attack + medium decay + zero sustain = kalimba / thumb piano.
-      // Completely organic character — no noise burst, no Karplus-Strong artifacts.
-      // The ball bouncing off a leaf now sounds like striking a soft bar.
-      synth = new Tone.Synth({
-        oscillator: { type: 'sine' },
-        envelope:   { attack: 0.001, decay: 0.55, sustain: 0, release: 2.0 },
-        volume:     -5,
-      }).connect(reverb);
-
+      // Dismiss screen and start loop immediately — don't block on audio init
       beginEl.style.opacity      = '0';
       beginEl.style.pointerEvents = 'none';
       setTimeout(() => beginEl.remove(), 700);
@@ -638,8 +623,19 @@
       setupInput();
       setupKeyboard();
       window.addEventListener('resize', onResize);
-
       requestAnimationFrame(loop);
+
+      // Audio init runs after visuals are live — ready well before first leaf hit
+      try {
+        await Audio.init();
+        const reverb = new Tone.Reverb({ decay: 1.8, wet: 0.34 });
+        reverb.toDestination();
+        synth = new Tone.Synth({
+          oscillator: { type: 'sine' },
+          envelope:   { attack: 0.001, decay: 0.55, sustain: 0, release: 2.0 },
+          volume:     -5,
+        }).connect(reverb);
+      } catch (_) {}
     }
 
     document.addEventListener('pointerdown', begin, { once: true });
