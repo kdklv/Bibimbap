@@ -611,8 +611,17 @@
 
     const beginEl = document.getElementById('begin');
 
-    async function begin() {
-      // Dismiss screen and start loop immediately — don't block on audio init
+    function begin() {
+      // Kick off AudioContext resume synchronously from user gesture — no await
+      Tone.start();
+      const reverb = new Tone.Reverb({ decay: 1.8, wet: 0.34 });
+      reverb.toDestination();
+      synth = new Tone.Synth({
+        oscillator: { type: 'sine' },
+        envelope:   { attack: 0.001, decay: 0.55, sustain: 0, release: 2.0 },
+        volume:     -5,
+      }).connect(reverb);
+
       beginEl.style.opacity      = '0';
       beginEl.style.pointerEvents = 'none';
       setTimeout(() => beginEl.remove(), 700);
@@ -624,18 +633,6 @@
       setupKeyboard();
       window.addEventListener('resize', onResize);
       requestAnimationFrame(loop);
-
-      // Audio init runs after visuals are live — ready well before first leaf hit
-      try {
-        await Audio.init();
-        const reverb = new Tone.Reverb({ decay: 1.8, wet: 0.34 });
-        reverb.toDestination();
-        synth = new Tone.Synth({
-          oscillator: { type: 'sine' },
-          envelope:   { attack: 0.001, decay: 0.55, sustain: 0, release: 2.0 },
-          volume:     -5,
-        }).connect(reverb);
-      } catch (_) {}
     }
 
     document.addEventListener('pointerdown', begin, { once: true });

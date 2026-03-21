@@ -548,8 +548,18 @@
     // ─── Begin gate ──────────────────────────────────────────────────────────
     const beginEl = document.getElementById('begin');
 
-    async function begin() {
-      // Dismiss screen and start loop immediately — don't block on audio init
+    function begin() {
+      // Kick off AudioContext resume synchronously from user gesture — no await
+      Tone.start();
+      const reverb = new Tone.Reverb({ decay: 2.6, wet: 0.40 });
+      reverb.toDestination();
+      synths = Array.from({ length: 5 }, () =>
+        new Tone.Synth({
+          oscillator: { type: 'sine' },
+          envelope:   { attack: 0.04, decay: 0.14, sustain: 0, release: 2.4 },
+        }).connect(reverb)
+      );
+
       beginEl.style.opacity = '0';
       beginEl.style.pointerEvents = 'none';
       setTimeout(() => beginEl.remove(), 700);
@@ -559,19 +569,6 @@
       setupInput();
       for (let i = 0; i < 5; i++) spawnIdlePlankton();
       requestAnimationFrame(loop);
-
-      // Audio init runs after visuals are live — ready well before first note
-      try {
-        await Audio.init();
-        const reverb = new Tone.Reverb({ decay: 2.6, wet: 0.40 });
-        reverb.toDestination();
-        synths = Array.from({ length: 5 }, () =>
-          new Tone.Synth({
-            oscillator: { type: 'sine' },
-            envelope:   { attack: 0.04, decay: 0.14, sustain: 0, release: 2.4 },
-          }).connect(reverb)
-        );
-      } catch (_) {}
     }
 
     document.addEventListener('pointerdown', begin, { once: true });
