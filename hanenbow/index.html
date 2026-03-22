@@ -27,9 +27,17 @@
       ctx.scale(dpr, dpr);
     }
 
-    // ─── Data structures ─────────────────────────────────────────────────────
+    // ─── Ball types ──────────────────────────────────────────────────────────
+    const BALL_DEFS = [
+      { key: 'normal', r: 8,  gravity: 0.25, speedCap: 18, boost: 1.05 },
+      { key: 'heavy',  r: 12, gravity: 0.40, speedCap: 22, boost: 1.02 },
+      { key: 'light',  r: 5,  gravity: 0.10, speedCap: 14, boost: 1.08 },
+    ];
+    const TYPE_HUES  = [210, 22, 165];   // blue / orange / teal — one per type
+    const BALL_HUES  = [195, 265, 340, 52, 130];  // per-ball trail colours (up to 5)
+    let   ballTypeIdx = 0;
 
-    // Default leaf layout — cascade that keeps the ball bouncing
+    // ─── Default layout ──────────────────────────────────────────────────────
     const LAYOUT = [
       { xf: 0.20, yf: 0.30, a:  0.35, len: 90  },
       { xf: 0.50, yf: 0.22, a:  0.00, len: 110 },
@@ -40,29 +48,34 @@
       { xf: 0.36, yf: 0.76, a:  0.18, len: 88  },
     ];
 
-    let leaves        = [];
-    let ball          = {};
-    let currentScale  = 'pentatonic';
+    // ─── State ───────────────────────────────────────────────────────────────
+    let leaves       = [];
+    let balls        = [];    // up to 5
+    let emitter      = { x: 0, y: 0 };
+    let particles    = [];    // sparks from leaf hits
+    let caustics     = [];    // ambient background blobs
+    let currentScale = 'pentatonic';
 
+    // ─── Leaf factory ────────────────────────────────────────────────────────
     function makeLeaf(x, y, angle, len) {
       const clampedAngle = Math.max(-Math.PI / 3, Math.min(Math.PI / 3, angle));
       const halfLen      = len !== undefined ? len : 60 + Math.random() * 60;
       return {
-        x, y,                          // target position (pointer-controlled)
-        displayX: x, displayY: y,      // lerped toward x,y — physics uses these
+        x, y,
+        displayX: x, displayY: y,
         angle: clampedAngle,
         len:   halfLen,
-        dragging:     false,
-        dragOffsetX:  0,
-        dragOffsetY:  0,
-        velHistory:   [],              // last 4 {x,y,t} pointer positions
-        releaseVelX:  0,
-        releaseVelY:  0,
-        wobble:        0,               // transient angular displacement from collision
-        wobbleVel:     0,              // angular velocity of wobble
-        flashT:        -Infinity,      // timestamp of last ball hit
-        lastNoteTime:  -Infinity,      // for 80ms debounce
-        lastRotateTime:-Infinity,      // for angle indicator fade
+        dragging:      false,
+        dragOffsetX:   0,
+        dragOffsetY:   0,
+        velHistory:    [],
+        releaseVelX:   0,
+        releaseVelY:   0,
+        wobble:        0,
+        wobbleVel:     0,
+        flashT:        -Infinity,
+        lastNoteTime:  -Infinity,
+        lastRotateTime:-Infinity,
       };
     }
 
@@ -72,32 +85,55 @@
 
     function randomiseLeaves() {
       for (const leaf of leaves) {
-        leaf.x          = leaf.len + 10 + Math.random() * (W - 2 * leaf.len - 20);
-        leaf.y          = 60 + Math.random() * (H * 0.82);
-        leaf.angle      = (Math.random() - 0.5) * (2 * Math.PI / 3);
+        leaf.x     = leaf.len + 10 + Math.random() * (W - 2 * leaf.len - 20);
+        leaf.y     = 60 + Math.random() * (H * 0.82);
+        leaf.angle = (Math.random() - 0.5) * (2 * Math.PI / 3);
         leaf.releaseVelX = 0;
         leaf.releaseVelY = 0;
       }
     }
 
-    function resetBall() {
-      ball.x          = W / 2;
-      ball.y          = H * 0.07;
-      ball.vx         = (Math.random() - 0.5) * 6;
-      ball.vy         = 1;
-      ball.r          = 8;
-      ball.trail      = [];
-      ball.stuckTimer = 0;
+    // ─── Emitter ─────────────────────────────────────────────────────────────
+    function resetEmitter() {
+      emitter.x = W / 2;
+      emitter.y = H * 0.07;
     }
 
-    // ─── Physics ─────────────────────────────────────────────────────────────
+    // ─── Ball spawner ────────────────────────────────────────────────────────
+    function spawnBall() {
+      if (balls.length >= 5) balls.shift();
+      const def = BALL_DEFS[ballTypeIdx];
+      balls.push({
+        x:        emitter.x,
+        y:        emitter.y,
+        vx:       (Math.random() - 0.5) * 6,
+        vy:       1,
+        r:        def.r,
+        gravity:  def.gravity,
+        speedCap: def.speedCap,
+        boost:    def.boost,
+        trail:    [],
+        stuckTimer: 0,
+        hue:      BALL_HUES[balls.length % 5],
+      });
+    }
 
-    // Effective angle = user angle + transient wobble, clamped to valid range.
+    // ─── Caustics init ────────────────────────────────────────────────────────
+    function initCaustics() {
+      caustics = Array.from({ length: 5 }, (_, i) => ({
+        x:     W * (0.12 + i * 0.19),
+        y:     H * (0.25 + (i % 2) * 0.38),
+        phase: Math.random() * Math.PI * 2,
+        r:     90 + Math.random() * 70,
+        hue:   130 + Math.random() * 50,
+      }));
+    }
+
+    // ─── Physics helpers ─────────────────────────────────────────────────────
     function leafEffAngle(leaf) {
       return Math.max(-Math.PI / 3, Math.min(Math.PI / 3, leaf.angle + leaf.wobble));
     }
 
-    // Point-to-segment distance test. Uses leaf.displayX/Y (visual position).
     function leafHit(b, leaf) {
       const eff = leafEffAngle(leaf);
       const ax = leaf.displayX - Math.cos(eff) * leaf.len;
@@ -111,7 +147,6 @@
       return Math.hypot(b.x - (ax + t * dx), b.y - (ay + t * dy)) < b.r + 3;
     }
 
-    // Reflect ball velocity around the leaf's surface normal.
     function reflect(b, leaf) {
       const eff = leafEffAngle(leaf);
       const nx  = -Math.sin(eff);
@@ -121,7 +156,6 @@
       b.vy -= 2 * dot * ny;
     }
 
-    // Push ball cleanly outside the leaf so it can't stick or tunnel.
     function pushOut(b, leaf) {
       const eff = leafEffAngle(leaf);
       const ax = leaf.displayX - Math.cos(eff) * leaf.len;
@@ -142,64 +176,43 @@
       }
     }
 
-    function updateBall() {
-      // Gravity — non-negotiable
-      ball.vy += 0.25;
-
-      // Speed cap — non-negotiable
-      const spd = Math.hypot(ball.vx, ball.vy);
-      if (spd > 18) { ball.vx *= 18 / spd; ball.vy *= 18 / spd; }
-
-      ball.x += ball.vx;
-      ball.y += ball.vy;
-
-      // Wall bounce (silent)
-      if (ball.x < ball.r)       { ball.x = ball.r;       ball.vx *= -0.9; }
-      if (ball.x > W - ball.r)   { ball.x = W - ball.r;   ball.vx *= -0.9; }
-      if (ball.y < ball.r)       { ball.y = ball.r;        ball.vy *= -0.9; }
-      if (ball.y > H + 80)       { resetBall(); return; }
-
-      // Leaf collisions
-      for (const leaf of leaves) {
-        if (!leafHit(ball, leaf)) continue;
-        pushOut(ball, leaf);
-        reflect(ball, leaf);
-        ball.vx *= 1.05;   // small energy boost — non-negotiable, prevents dying
-        ball.vy *= 1.05;
-
-        // Angular impulse: hit near tip → more wobble than hit near centre
-        const eff  = leafEffAngle(leaf);
-        const hax  = leaf.displayX - Math.cos(eff) * leaf.len;
-        const hay  = leaf.displayY - Math.sin(eff) * leaf.len;
-        const hbx  = leaf.displayX + Math.cos(eff) * leaf.len;
-        const hby  = leaf.displayY + Math.sin(eff) * leaf.len;
-        const hdx  = hbx - hax, hdy = hby - hay;
-        const ht   = Math.max(0, Math.min(1,
-          ((ball.x - hax) * hdx + (ball.y - hay) * hdy) / (hdx * hdx + hdy * hdy)
-        ));
-        const leverArm    = (ht - 0.5) * 2;              // –1…+1, tip-to-tip
-        const hnx         = -Math.sin(eff), hny = Math.cos(eff);
-        const impactSpeed = Math.abs(ball.vx * hnx + ball.vy * hny);
-        leaf.wobbleVel   += leverArm * impactSpeed * 0.0022;
-
-        leaf.flashT = performance.now();
-        triggerLeafNote(leaf);
+    // ─── Particles ───────────────────────────────────────────────────────────
+    function emitSparks(b, leaf) {
+      if (particles.length > 56) return;
+      // Fan out in the post-bounce direction of the ball
+      const baseAngle = Math.atan2(b.vy, b.vx);
+      for (let i = 0; i < 7; i++) {
+        const spread = (Math.random() - 0.5) * Math.PI * 0.9;
+        const angle  = baseAngle + spread;
+        const spd    = 1.5 + Math.random() * 4.5;
+        particles.push({
+          x: b.x, y: b.y,
+          vx: Math.cos(angle) * spd,
+          vy: Math.sin(angle) * spd,
+          life: 1.0,
+          hue: b.hue,
+          r:   1 + Math.random() * 2.2,
+        });
       }
-
-      // Stuck detection
-      if (spd < 0.5) ball.stuckTimer++;
-      else           ball.stuckTimer = 0;
-      if (ball.stuckTimer > 120) resetBall();
-
-      // Trail
-      ball.trail.push({ x: ball.x, y: ball.y });
-      if (ball.trail.length > 20) ball.trail.shift();
     }
 
+    function updateParticles() {
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.vy  += 0.06;
+        p.x   += p.vx;
+        p.y   += p.vy;
+        p.vx  *= 0.94;
+        p.vy  *= 0.94;
+        p.life -= 0.032;
+        if (p.life <= 0) particles.splice(i, 1);
+      }
+    }
+
+    // ─── Update ──────────────────────────────────────────────────────────────
     function updateLeaves() {
       for (const leaf of leaves) {
         if (!leaf.dragging) {
-          // Apply release momentum (decays quickly)
           const speed = Math.hypot(leaf.releaseVelX, leaf.releaseVelY);
           if (speed > 0.05) {
             leaf.x += leaf.releaseVelX;
@@ -210,39 +223,98 @@
             leaf.y = Math.max(20, Math.min(H - 20, leaf.y));
           }
         }
-        // Wobble spring — springs back to 0, settles in ~0.5s
         leaf.wobbleVel += -leaf.wobble * 0.18;
         leaf.wobbleVel *= 0.80;
         leaf.wobble    += leaf.wobbleVel;
-
-        // Lerp display toward target — this is the weighted feel (0.18 per spec)
-        leaf.displayX += (leaf.x - leaf.displayX) * 0.18;
-        leaf.displayY += (leaf.y - leaf.displayY) * 0.18;
+        leaf.displayX  += (leaf.x - leaf.displayX) * 0.18;
+        leaf.displayY  += (leaf.y - leaf.displayY) * 0.18;
       }
     }
 
-    // ─── Update ──────────────────────────────────────────────────────────────
+    function updateBalls() {
+      // Iterate backwards so splice indices stay valid
+      for (let i = balls.length - 1; i >= 0; i--) {
+        const b = balls[i];
 
-    function update() {
-      updateLeaves();   // display positions must be fresh before ball collision
-      updateBall();
+        b.vy += b.gravity;
+        const spd = Math.hypot(b.vx, b.vy);
+        if (spd > b.speedCap) { b.vx *= b.speedCap / spd; b.vy *= b.speedCap / spd; }
+
+        b.x += b.vx;
+        b.y += b.vy;
+
+        // Wall bounce (silent)
+        if (b.x < b.r)       { b.x = b.r;       b.vx *= -0.9; }
+        if (b.x > W - b.r)   { b.x = W - b.r;   b.vx *= -0.9; }
+        if (b.y < b.r)       { b.y = b.r;        b.vy *= -0.9; }
+        if (b.y > H + 80)    {
+          balls.splice(i, 1);
+          if (balls.length === 0) spawnBall();
+          continue;
+        }
+
+        // Leaf collisions
+        for (const leaf of leaves) {
+          if (!leafHit(b, leaf)) continue;
+          pushOut(b, leaf);
+          reflect(b, leaf);
+          b.vx *= b.boost;
+          b.vy *= b.boost;
+
+          // Angular impulse: hit near tip → more wobble
+          const eff  = leafEffAngle(leaf);
+          const hax  = leaf.displayX - Math.cos(eff) * leaf.len;
+          const hay  = leaf.displayY - Math.sin(eff) * leaf.len;
+          const hbx  = leaf.displayX + Math.cos(eff) * leaf.len;
+          const hby  = leaf.displayY + Math.sin(eff) * leaf.len;
+          const hdx  = hbx - hax, hdy = hby - hay;
+          const ht   = Math.max(0, Math.min(1,
+            ((b.x - hax) * hdx + (b.y - hay) * hdy) / (hdx * hdx + hdy * hdy)
+          ));
+          const leverArm    = (ht - 0.5) * 2;
+          const hnx         = -Math.sin(eff), hny = Math.cos(eff);
+          const impactSpeed = Math.abs(b.vx * hnx + b.vy * hny);
+          leaf.wobbleVel   += leverArm * impactSpeed * 0.0022;
+
+          emitSparks(b, leaf);
+          leaf.flashT = performance.now();
+          triggerLeafNote(leaf);
+        }
+
+        // Stuck detection
+        if (spd < 0.5) b.stuckTimer++;
+        else           b.stuckTimer = 0;
+        if (b.stuckTimer > 120) {
+          balls.splice(i, 1);
+          if (balls.length === 0) spawnBall();
+          continue;
+        }
+
+        // Trail
+        b.trail.push({ x: b.x, y: b.y });
+        if (b.trail.length > 20) b.trail.shift();
+      }
     }
 
-    // ─── Audio (Web Audio API — works reliably on iOS) ───────────────────────
+    function update() {
+      updateLeaves();
+      updateBalls();
+      updateParticles();
+    }
 
+    // ─── Audio ───────────────────────────────────────────────────────────────
     let audioCtx  = null;
     let convolver = null;
     let masterOut = null;
 
     function initAudio() {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      audioCtx.resume();   // fire-and-forget within gesture — satisfies iOS policy
+      audioCtx.resume();
 
       masterOut = audioCtx.createGain();
       masterOut.gain.value = 0.68;
       masterOut.connect(audioCtx.destination);
 
-      // Programmatic reverb impulse response
       const sr  = audioCtx.sampleRate;
       const len = Math.floor(sr * 2.0);
       const buf = audioCtx.createBuffer(2, len, sr);
@@ -278,7 +350,6 @@
       osc.stop(t + attack + decay + 0.1);
     }
 
-    // Map leaf angle (–π/3 to +π/3) → MIDI note in current scale, 2 octaves.
     function leafAngleToMidi(leaf) {
       const t      = (leaf.angle + Math.PI / 3) / (2 * Math.PI / 3);
       const scale  = Audio.scales[currentScale];
@@ -291,136 +362,211 @@
 
     function triggerLeafNote(leaf) {
       const now = performance.now();
-      if (now - leaf.lastNoteTime < 80) return;   // 80ms debounce
+      if (now - leaf.lastNoteTime < 80) return;
       leaf.lastNoteTime = now;
       playNote(leafAngleToMidi(leaf), 0.001, 0.6, 0.35);
     }
 
     // ─── Draw ────────────────────────────────────────────────────────────────
 
+    function drawBackground(now) {
+      // Motion-blur persistence
+      ctx.fillStyle = 'rgba(8, 12, 20, 0.25)';
+      ctx.fillRect(0, 0, W, H);
+
+      // Ambient caustic blobs — drift slowly, radial gradient glow
+      const t = now * 0.0003;
+      for (const c of caustics) {
+        const cx = c.x + Math.cos(t * 0.55 + c.phase) * 38;
+        const cy = c.y + Math.sin(t * 0.38 + c.phase * 1.3) * 22;
+        const g  = ctx.createRadialGradient(cx, cy, 0, cx, cy, c.r);
+        g.addColorStop(0, `hsla(${c.hue}, 55%, 40%, 0.055)`);
+        g.addColorStop(1, `hsla(${c.hue}, 55%, 40%, 0)`);
+        ctx.save();
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(cx, cy, c.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
     function drawLeaf(leaf, now) {
       const flash     = Math.max(0, 1 - (now - leaf.flashT) / 300);
-      const lightness = 22 + flash * 38;   // 22% rest → 60% full hit
-      const halfW     = 8  + flash * 6;    //  8px rest → 14px full hit
+      // Hue varies with angle: left-leaning → teal (165), flat → green (135), right-leaning → lime (105)
+      const tAngle    = (leaf.angle + Math.PI / 3) / (2 * Math.PI / 3);
+      const hue       = 165 - tAngle * 60;   // 165 (teal) → 105 (lime-green)
+      const lightness = 20 + flash * 42;
+      const halfW     = 8  + flash * 6;
 
       ctx.save();
       ctx.translate(leaf.displayX, leaf.displayY);
       ctx.rotate(leafEffAngle(leaf));
 
-      if (flash > 0.05) {
-        ctx.shadowBlur  = flash * 24;
-        ctx.shadowColor = `hsla(140, 70%, 65%, ${flash * 0.9})`;
-      }
+      // Ambient + flash glow on body
+      ctx.shadowBlur  = 10 + flash * 24;
+      ctx.shadowColor = `hsla(${hue}, 75%, 65%, ${0.10 + flash * 0.85})`;
 
-      ctx.fillStyle = `hsl(140, 38%, ${lightness}%)`;
+      // Body ellipse
+      ctx.fillStyle = `hsl(${hue}, 48%, ${lightness}%)`;
       ctx.beginPath();
-      // Spec: ctx.ellipse(0, 0, leaf.len, 8 + flash*6, 0, 0, Math.PI*2)
       ctx.ellipse(0, 0, leaf.len, halfW, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      ctx.shadowBlur  = 0;
-      ctx.strokeStyle = `hsla(140, 35%, ${lightness + 14}%, 0.3)`;
+      ctx.shadowBlur = 0;
+
+      // Subtle edge highlight
+      ctx.strokeStyle = `hsla(${hue}, 40%, ${lightness + 20}%, 0.2)`;
       ctx.lineWidth   = 0.8;
       ctx.stroke();
+
+      // Midrib — central vein along leaf axis
+      ctx.strokeStyle = `hsla(${hue + 10}, 40%, ${lightness + 28}%, 0.5)`;
+      ctx.lineWidth   = 0.9;
+      ctx.lineCap     = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-leaf.len * 0.88, 0);
+      ctx.lineTo( leaf.len * 0.88, 0);
+      ctx.stroke();
+
+      // Side veins — 4 pairs branching from midrib, angling toward nearest tip
+      ctx.strokeStyle = `hsla(${hue}, 35%, ${lightness + 22}%, 0.3)`;
+      ctx.lineWidth   = 0.5;
+      for (let k = 0; k < 4; k++) {
+        const vx   = (-0.6 + k * 0.4) * leaf.len;  // –0.6, –0.2, 0.2, 0.6
+        const tilt = vx * 0.2;                       // lean toward nearest tip
+        ctx.beginPath();
+        ctx.moveTo(vx, 0);
+        ctx.lineTo(vx + tilt, halfW * 0.82);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(vx, 0);
+        ctx.lineTo(vx + tilt, -halfW * 0.82);
+        ctx.stroke();
+      }
 
       ctx.restore();
     }
 
-    // Subtle arc showing current angle position within the rotatable range.
-    // Visible for 1s after any rotate event, then fades.
     function drawAngleIndicator(leaf, now) {
       const age = now - leaf.lastRotateTime;
       if (age < 0 || age > 1000) return;
-
       const fade = 1 - age / 1000;
       const R    = 44;
-      const cx   = leaf.displayX;
-      const cy   = leaf.displayY;
-
       ctx.save();
-
-      // Full rotatable range arc (mapped to the "up" sector around the leaf)
       ctx.globalAlpha = fade * 0.28;
       ctx.strokeStyle = '#a0c4ff';
       ctx.lineWidth   = 1.5;
       ctx.lineCap     = 'round';
       ctx.beginPath();
-      ctx.arc(cx, cy, R, -Math.PI / 2 - Math.PI / 3, -Math.PI / 2 + Math.PI / 3);
+      ctx.arc(leaf.displayX, leaf.displayY, R, -Math.PI / 2 - Math.PI / 3, -Math.PI / 2 + Math.PI / 3);
       ctx.stroke();
-
-      // Current angle — brighter radial tick
       ctx.globalAlpha  = fade * 0.82;
       ctx.lineWidth    = 2;
-      const iAngle     = -Math.PI / 2 + leaf.angle;   // 0 → straight up
+      const iAngle     = -Math.PI / 2 + leaf.angle;
       ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(cx + Math.cos(iAngle) * R, cy + Math.sin(iAngle) * R);
+      ctx.moveTo(leaf.displayX, leaf.displayY);
+      ctx.lineTo(leaf.displayX + Math.cos(iAngle) * R, leaf.displayY + Math.sin(iAngle) * R);
       ctx.stroke();
-
       ctx.restore();
     }
 
-    function drawBall() {
-      // Trail — fading polyline, 20 points
-      for (let i = 1; i < ball.trail.length; i++) {
-        const t = i / ball.trail.length;
+    function drawParticles() {
+      for (const p of particles) {
         ctx.save();
-        ctx.globalAlpha = t * 0.45;
-        ctx.strokeStyle = '#e8eaf0';
-        ctx.lineWidth   = t * 5;
+        ctx.globalAlpha = p.life * 0.88;
+        ctx.fillStyle   = `hsl(${p.hue}, 80%, 82%)`;
+        ctx.shadowBlur  = 5;
+        ctx.shadowColor = `hsl(${p.hue}, 90%, 75%)`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, Math.max(0.4, p.r * p.life), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    function drawBall(b) {
+      // Hue-tinted trail
+      for (let i = 1; i < b.trail.length; i++) {
+        const t = i / b.trail.length;
+        ctx.save();
+        ctx.globalAlpha = t * 0.5;
+        ctx.strokeStyle = `hsla(${b.hue}, 72%, 82%, 1)`;
+        ctx.lineWidth   = t * b.r * 0.85;
         ctx.lineCap     = 'round';
         ctx.beginPath();
-        ctx.moveTo(ball.trail[i - 1].x, ball.trail[i - 1].y);
-        ctx.lineTo(ball.trail[i].x,     ball.trail[i].y);
+        ctx.moveTo(b.trail[i - 1].x, b.trail[i - 1].y);
+        ctx.lineTo(b.trail[i].x,     b.trail[i].y);
         ctx.stroke();
         ctx.restore();
       }
 
-      // Body — white, shadowBlur=24 per spec
+      // Body with type-coloured glow
       ctx.save();
-      ctx.shadowBlur  = 24;
-      ctx.shadowColor = 'rgba(255, 255, 255, 0.85)';
-      ctx.fillStyle   = '#ffffff';
+      ctx.shadowBlur  = 18 + b.r;
+      ctx.shadowColor = `hsla(${b.hue}, 80%, 88%, 0.7)`;
+      ctx.fillStyle   = `hsl(${b.hue}, 55%, 92%)`;
       ctx.beginPath();
-      ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
     }
 
-    function draw() {
-      const now = performance.now();
+    function drawEmitter(now) {
+      const pulse = 0.5 + 0.5 * Math.sin(now * 0.0028);
+      const hue   = TYPE_HUES[ballTypeIdx];
 
-      // Motion-blur persistence (Hanenbow uses this strategy per spec)
-      ctx.fillStyle = 'rgba(8, 12, 20, 0.25)';
-      ctx.fillRect(0, 0, W, H);
+      ctx.save();
+      ctx.shadowBlur  = 16 + pulse * 10;
+      ctx.shadowColor = `hsla(${hue}, 75%, 70%, 0.55)`;
 
-      // Leaves (drawing order: leaves → indicators → ball, so ball is on top)
+      // Outer pulsing ring
+      ctx.strokeStyle = `hsla(${hue}, 65%, 75%, ${0.42 + pulse * 0.35})`;
+      ctx.lineWidth   = 1.5;
+      ctx.beginPath();
+      ctx.arc(emitter.x, emitter.y, 14 + pulse * 2.5, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Inner dot
+      ctx.fillStyle  = `hsla(${hue}, 80%, 88%, 0.9)`;
+      ctx.shadowBlur = 8;
+      ctx.beginPath();
+      ctx.arc(emitter.x, emitter.y, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function draw(now) {
+      drawBackground(now);
       for (const leaf of leaves) drawLeaf(leaf, now);
       for (const leaf of leaves) drawAngleIndicator(leaf, now);
-      drawBall();
+      drawParticles();
+      for (const b of balls) drawBall(b);
+      drawEmitter(now);
     }
 
     // ─── Loop ────────────────────────────────────────────────────────────────
-
-    function loop() {
+    function loop(now) {
       update();
-      draw();
+      draw(now);
       requestAnimationFrame(loop);
     }
 
     // ─── Input ───────────────────────────────────────────────────────────────
+    const ptrs = new Map();
 
-    const ptrs = new Map();   // pointerId → {x, y}  — all currently-active pointers
-
-    let dragLeaf     = null;
-    let dragPtrId    = null;
-    let rotateLeaf   = null;
-    let prevRotAngle = 0;
-    let maxPointers  = 0;     // peak simultaneous pointers in current gesture
+    let dragLeaf          = null;
+    let dragPtrId         = null;
+    let dragEmitter       = false;
+    let dragEmPtrId       = null;
+    let emitterHoldTimer  = null;   // interval for hold-to-spam on mobile
+    let rotateLeaf     = null;
+    let prevRotAngle   = 0;
+    let maxPointers    = 0;
 
     let mouseX = 0, mouseY = 0;
 
-    // Double-tap state
     let lastTapUpTime = 0;
     let lastTapUpPos  = { x: 0, y: 0 };
     let ptrDownPos    = { x: 0, y: 0 };
@@ -439,12 +585,8 @@
       return best;
     }
 
-    // Returns angle of the vector between the two active pointers.
-    // Sorted by pointerId so the angle is consistent regardless of which moved.
     function twoFingerAngle() {
-      const pts = [...ptrs.entries()]
-        .sort((a, b) => a[0] - b[0])
-        .map(e => e[1]);
+      const pts = [...ptrs.entries()].sort((a, b) => a[0] - b[0]).map(e => e[1]);
       return Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
     }
 
@@ -463,61 +605,64 @@
       if (ptrs.size === 1) {
         ptrDownPos = { ...p };
 
-        // Try to grab a leaf (44px hit radius per spec)
-        const leaf = nearestLeaf(p.x, p.y, 44);
-        if (leaf) {
-          dragLeaf           = leaf;
-          dragPtrId          = e.pointerId;
-          leaf.dragging      = true;
-          leaf.dragOffsetX   = leaf.x - p.x;
-          leaf.dragOffsetY   = leaf.y - p.y;
-          leaf.velHistory    = [];
-          leaf.releaseVelX   = 0;
-          leaf.releaseVelY   = 0;
+        // Emitter takes priority over leaves (30px radius)
+        if (Math.hypot(p.x - emitter.x, p.y - emitter.y) < 30) {
+          dragEmitter = true;
+          dragEmPtrId = e.pointerId;
+          spawnBall();                                        // immediate on press
+          emitterHoldTimer = setInterval(spawnBall, 380);    // hold → spam
+        } else {
+          // Try to grab a leaf
+          const leaf = nearestLeaf(p.x, p.y, 44);
+          if (leaf) {
+            dragLeaf           = leaf;
+            dragPtrId          = e.pointerId;
+            leaf.dragging      = true;
+            leaf.dragOffsetX   = leaf.x - p.x;
+            leaf.dragOffsetY   = leaf.y - p.y;
+            leaf.velHistory    = [];
+            leaf.releaseVelX   = 0;
+            leaf.releaseVelY   = 0;
+          }
         }
 
       } else if (ptrs.size === 2) {
-        // Second finger down: end any drag and switch to two-finger rotate
-        if (dragLeaf) {
-          endDrag(false);   // no release momentum when interrupted by second finger
+        if (dragLeaf)    endDrag(false);
+        if (dragEmitter) {
+          dragEmitter = false; dragEmPtrId = null;
+          clearInterval(emitterHoldTimer); emitterHoldTimer = null;
         }
         const mid  = twoFingerMid();
         rotateLeaf = nearestLeaf(mid.x, mid.y, 150);
-        if (rotateLeaf) {
-          prevRotAngle = twoFingerAngle();
-        }
+        if (rotateLeaf) prevRotAngle = twoFingerAngle();
       }
     }
 
     function onMove(e) {
       const p = canvasPos(e);
-      // Always track mouse position for wheel-rotate (works even without a press)
       mouseX = p.x;
       mouseY = p.y;
 
       if (!ptrs.has(e.pointerId)) return;
       ptrs.set(e.pointerId, p);
 
-      if (ptrs.size === 1 && dragLeaf && e.pointerId === dragPtrId) {
-        // Drag: update target position
-        dragLeaf.x = p.x + dragLeaf.dragOffsetX;
-        dragLeaf.y = p.y + dragLeaf.dragOffsetY;
-        dragLeaf.x = Math.max(20, Math.min(W - 20, dragLeaf.x));
-        dragLeaf.y = Math.max(20, Math.min(H - 20, dragLeaf.y));
-
-        // Velocity history: track raw pointer position for release momentum
-        dragLeaf.velHistory.push({ x: p.x, y: p.y, t: performance.now() });
-        if (dragLeaf.velHistory.length > 4) dragLeaf.velHistory.shift();
-
+      if (ptrs.size === 1) {
+        if (dragEmitter && e.pointerId === dragEmPtrId) {
+          emitter.x = Math.max(20, Math.min(W - 20, p.x));
+          emitter.y = Math.max(20, Math.min(H - 20, p.y));
+        } else if (dragLeaf && e.pointerId === dragPtrId) {
+          dragLeaf.x = p.x + dragLeaf.dragOffsetX;
+          dragLeaf.y = p.y + dragLeaf.dragOffsetY;
+          dragLeaf.x = Math.max(20, Math.min(W - 20, dragLeaf.x));
+          dragLeaf.y = Math.max(20, Math.min(H - 20, dragLeaf.y));
+          dragLeaf.velHistory.push({ x: p.x, y: p.y, t: performance.now() });
+          if (dragLeaf.velHistory.length > 4) dragLeaf.velHistory.shift();
+        }
       } else if (ptrs.size >= 2 && rotateLeaf) {
-        // Two-finger rotate: compute delta from last known angle
         const newAngle = twoFingerAngle();
         let delta = newAngle - prevRotAngle;
-
-        // Wrap delta to [–π, π] so we never spin the leaf backwards
         if (delta >  Math.PI) delta -= Math.PI * 2;
         if (delta < -Math.PI) delta += Math.PI * 2;
-
         rotateLeaf.angle = Math.max(
           -Math.PI / 3,
           Math.min( Math.PI / 3, rotateLeaf.angle + delta)
@@ -534,7 +679,6 @@
         if (h.length >= 2) {
           const dt = h[h.length - 1].t - h[0].t;
           if (dt > 0) {
-            // Velocity in px/ms → scale to px/frame (~16.7ms), cap at 10px/frame
             let vx = (h[h.length - 1].x - h[0].x) / dt * 16;
             let vy = (h[h.length - 1].y - h[0].y) / dt * 16;
             const mag = Math.hypot(vx, vy);
@@ -550,15 +694,19 @@
     }
 
     function onUp(e) {
-      const p          = canvasPos(e);
-      const wasMulti   = ptrs.size >= 2;
+      const p        = canvasPos(e);
+      const wasMulti = ptrs.size >= 2;
 
-      if (e.pointerId === dragPtrId) endDrag(true);
+      if (e.pointerId === dragEmPtrId) {
+        dragEmitter = false;
+        dragEmPtrId = null;
+        clearInterval(emitterHoldTimer);
+        emitterHoldTimer = null;
+      }
+      if (e.pointerId === dragPtrId)   endDrag(true);
       ptrs.delete(e.pointerId);
       if (ptrs.size < 2) rotateLeaf = null;
 
-      // Double-tap detection — only on single-touch gestures where the finger
-      // didn't drag (moved < 12px from down position)
       if (!wasMulti && ptrs.size === 0 && maxPointers === 1) {
         const moved = Math.hypot(p.x - ptrDownPos.x, p.y - ptrDownPos.y);
         if (moved < 12) {
@@ -568,7 +716,7 @@
             Math.hypot(p.x - lastTapUpPos.x, p.y - lastTapUpPos.y) < 44
           ) {
             handleDoubleClick(p.x, p.y);
-            lastTapUpTime = 0;   // reset so triple-tap doesn't double-trigger
+            lastTapUpTime = 0;
           } else {
             lastTapUpTime = now;
             lastTapUpPos  = { ...p };
@@ -591,17 +739,14 @@
     }
 
     function handleDoubleClick(x, y) {
+      // Don't add/remove if near emitter
+      if (Math.hypot(x - emitter.x, y - emitter.y) < 30) return;
       const leaf = nearestLeaf(x, y, 50);
       if (leaf) {
-        // Remove leaf (min 2 leaves)
-        if (leaves.length > 2) {
-          leaves.splice(leaves.indexOf(leaf), 1);
-        }
+        if (leaves.length > 2) leaves.splice(leaves.indexOf(leaf), 1);
       } else {
-        // Add leaf at click position (max 12)
-        if (leaves.length < 12) {
+        if (leaves.length < 12)
           leaves.push(makeLeaf(x, y, (Math.random() - 0.5) * Math.PI / 3));
-        }
       }
     }
 
@@ -614,20 +759,26 @@
     }
 
     // ─── Keyboard ────────────────────────────────────────────────────────────
-
     function setupKeyboard() {
       document.addEventListener('keydown', e => {
         switch (e.code) {
-          case 'KeyR':
-            e.preventDefault();
-            resetBall();
-            break;
           case 'Space':
             e.preventDefault();
-            randomiseLeaves();
+            spawnBall();            // spawn new ball from emitter
+            break;
+          case 'KeyR':
+            e.preventDefault();
+            balls = [];
+            spawnBall();            // clear all, respawn one
+            break;
+          case 'KeyV':
+            randomiseLeaves();      // was Space — now V
             break;
           case 'KeyC':
             initLeaves();
+            break;
+          case 'KeyB':
+            ballTypeIdx = (ballTypeIdx + 1) % BALL_DEFS.length;
             break;
           case 'Digit1': currentScale = 'gamelan';    break;
           case 'Digit2': currentScale = 'pentatonic'; break;
@@ -639,7 +790,6 @@
     }
 
     // ─── Resize ──────────────────────────────────────────────────────────────
-
     function onResize() {
       if (!W || !H) return;
       const scaleX = canvas.getBoundingClientRect().width  / W;
@@ -649,17 +799,21 @@
         leaf.x        *= scaleX; leaf.displayX *= scaleX;
         leaf.y        *= scaleY; leaf.displayY *= scaleY;
       }
-      if (ball.x > W || ball.y > H + 80) resetBall();
+      emitter.x *= scaleX;
+      emitter.y *= scaleY;
+      for (const b of balls) {
+        b.x *= scaleX; b.y *= scaleY;
+        b.trail = b.trail.map(pt => ({ x: pt.x * scaleX, y: pt.y * scaleY }));
+      }
+      initCaustics();
     }
 
     // ─── Begin gate ──────────────────────────────────────────────────────────
-
     const beginEl = document.getElementById('begin');
 
     function begin() {
       initAudio();
 
-      // Re-resume after iOS background suspension
       document.addEventListener('visibilitychange', () => {
         if (!document.hidden && audioCtx && audioCtx.state === 'suspended')
           audioCtx.resume();
@@ -674,7 +828,9 @@
 
       setupCanvas();
       initLeaves();
-      resetBall();
+      resetEmitter();
+      initCaustics();
+      spawnBall();
       setupInput();
       setupKeyboard();
       window.addEventListener('resize', onResize);
