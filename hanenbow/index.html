@@ -58,10 +58,11 @@
 
     // Water simulation
     const WATER_COLS = 80;
-    let   waterY     = null;   // Float32Array — displacement from rest (px, down = positive)
-    let   waterV     = null;   // Float32Array — velocity
-    let   waterRestY = 0;      // rest y of water surface
-    let   sprayParticles = []; // water droplets from splashes
+    let   waterY        = null;   // Float32Array — displacement from rest (px, down = positive)
+    let   waterV        = null;   // Float32Array — velocity
+    let   waterRestY    = 0;      // rest y of water surface
+    let   sprayParticles  = [];   // water droplets from splashes
+    let   waterRipples    = [];   // expanding elliptical rings on surface
 
     // ─── Leaf factory ────────────────────────────────────────────────────────
     function makeLeaf(x, y, angle, len) {
@@ -131,6 +132,22 @@
       waterY          = new Float32Array(WATER_COLS);
       waterV          = new Float32Array(WATER_COLS);
       sprayParticles  = [];
+      waterRipples    = [];
+    }
+
+    function spawnRipple(x, y, strength) {
+      const maxR = 18 + Math.abs(strength) * 5;
+      waterRipples.push({ x, y, r: 2,        maxR,            life: 1.0  });
+      waterRipples.push({ x, y, r: 0,        maxR: maxR * 0.6, life: 0.80 });
+    }
+
+    function updateRipples() {
+      for (let i = waterRipples.length - 1; i >= 0; i--) {
+        const rp = waterRipples[i];
+        rp.r    += (rp.maxR - rp.r) * 0.055;
+        rp.life -= 0.026;
+        if (rp.life <= 0) waterRipples.splice(i, 1);
+      }
     }
 
     function splashWater(xPixel, strength) {
@@ -186,6 +203,7 @@
           const col = Math.max(0, Math.min(WATER_COLS - 1, Math.round((p.x / W) * (WATER_COLS - 1))));
           if (p.y >= waterRestY + waterY[col]) {
             splashWater(p.x, p.vy * p.r * 0.09);
+            spawnRipple(p.x, waterRestY + waterY[col], p.vy * 0.35);
             sprayParticles.splice(i, 1);
             continue;
           }
@@ -330,6 +348,8 @@
           if (b.vy > 0 && b.y + b.r * 0.5 >= surfaceY) {
             splashWater(b.x, b.vy * b.r * 0.30);
             emitSpray(b.x, surfaceY, b.vy);
+            spawnRipple(b.x, surfaceY, b.vy);
+            playSplash(b.x, b.vy, b.r);
             balls.splice(i, 1);
             if (balls.length === 0) spawnBall();
             continue;
@@ -391,6 +411,7 @@
       updateParticles();
       updateWater();
       updateSpray();
+      updateRipples();
     }
 
     // ─── Audio ───────────────────────────────────────────────────────────────
@@ -439,6 +460,65 @@
       gain.connect(convolver);
       osc.start(t);
       osc.stop(t + attack + decay + 0.1);
+    }
+
+    // Water bloop — parametric across 5 dimensions so every splash sounds unique.
+    //   x        → base pitch (left=low, right=high)
+    //   speed    → starting pitch ratio + volume (faster = louder, steeper slide)
+    //   ballR    → ball size inverts pitch (small=high, large=low) + decay length
+    //   random   → ±18% pitch scatter, random slide duration, random overtone choice
+    //   overtone → 70% chance of a harmonic partial at 1.5×, 2×, or 3× fundamental
+    function playSplash(x, speed, ballR) {
+      if (!audioCtx) return;
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+
+      const t = audioCtx.currentTime;
+
+      // 1. Base frequency — x position × size influence × random scatter
+      const sizeScale = 8 / ballR;                          // light(r=5)→1.6× heavy(r=12)→0.67×
+      const scatter   = 0.82 + Math.random() * 0.36;        // ±18% each splash
+      const baseFreq  = (105 + (x / W) * 190) * sizeScale * scatter;
+
+      // 2. Pitch-slide parameters — speed makes the drop start higher and fall steeper
+      const slideRatio = 2.0 + Math.min(2.2, speed * 0.09); // 2.0–4.2×
+      const slideTime  = 0.08 + Math.random() * 0.10;       // 80–180 ms
+
+      // 3. Amplitude envelope — decay scales with ball size, speed sets peak volume
+      const decay = 0.22 + (ballR / 8) * 0.20 + Math.random() * 0.10;
+      const vol   = Math.min(0.28, 0.09 + speed * 0.009);
+
+      // ── Fundamental ──
+      const osc1  = audioCtx.createOscillator();
+      const env1  = audioCtx.createGain();
+      osc1.type = 'sine';
+      osc1.frequency.setValueAtTime(baseFreq * slideRatio, t);
+      osc1.frequency.exponentialRampToValueAtTime(baseFreq, t + slideTime);
+      env1.gain.setValueAtTime(0.0001, t);
+      env1.gain.linearRampToValueAtTime(vol, t + 0.005);
+      env1.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+      osc1.connect(env1);
+      env1.connect(masterOut);
+      env1.connect(convolver);
+      osc1.start(t);
+      osc1.stop(t + decay + 0.05);
+
+      // ── Overtone partial (70% chance) — adds bubble-like texture ──
+      if (Math.random() > 0.30) {
+        const ratio = [1.5, 2, 3][Math.floor(Math.random() * 3)];
+        const osc2  = audioCtx.createOscillator();
+        const env2  = audioCtx.createGain();
+        osc2.type = 'sine';
+        osc2.frequency.setValueAtTime(baseFreq * ratio * slideRatio * 0.75, t);
+        osc2.frequency.exponentialRampToValueAtTime(baseFreq * ratio, t + slideTime * 0.8);
+        const partialDecay = decay * (0.4 + Math.random() * 0.3);
+        env2.gain.setValueAtTime(0.0001, t);
+        env2.gain.linearRampToValueAtTime(vol * 0.28, t + 0.004);
+        env2.gain.exponentialRampToValueAtTime(0.0001, t + partialDecay);
+        osc2.connect(env2);
+        env2.connect(masterOut);
+        osc2.start(t);
+        osc2.stop(t + partialDecay + 0.05);
+      }
     }
 
     function leafAngleToMidi(leaf) {
@@ -684,6 +764,22 @@
       ctx.restore();
     }
 
+    function drawRipples() {
+      for (const rp of waterRipples) {
+        ctx.save();
+        ctx.globalAlpha = rp.life * 0.52;
+        ctx.strokeStyle = 'hsla(192, 80%, 74%, 1)';
+        ctx.lineWidth   = 1.2;
+        ctx.shadowBlur  = 6;
+        ctx.shadowColor = 'hsla(192, 85%, 70%, 0.7)';
+        ctx.beginPath();
+        // Foreshortened ellipse — wide and flat, sitting on the water surface
+        ctx.ellipse(rp.x, rp.y, rp.r, rp.r * 0.22, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
     function drawSpray() {
       for (const p of sprayParticles) {
         ctx.save();
@@ -705,6 +801,7 @@
       drawParticles();
       for (const b of balls) drawBall(b);
       drawWater(now);
+      drawRipples();
       drawSpray();
       drawEmitter(now);
     }
