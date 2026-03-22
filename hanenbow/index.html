@@ -56,6 +56,13 @@
     let caustics     = [];    // ambient background blobs
     let currentScale = 'pentatonic';
 
+    // Water simulation
+    const WATER_COLS = 80;
+    let   waterY     = null;   // Float32Array — displacement from rest (px, down = positive)
+    let   waterV     = null;   // Float32Array — velocity
+    let   waterRestY = 0;      // rest y of water surface
+    let   sprayParticles = []; // water droplets from splashes
+
     // ─── Leaf factory ────────────────────────────────────────────────────────
     function makeLeaf(x, y, angle, len) {
       const clampedAngle = Math.max(-Math.PI / 3, Math.min(Math.PI / 3, angle));
@@ -116,6 +123,75 @@
         stuckTimer: 0,
         hue:      BALL_HUES[balls.length % 5],
       });
+    }
+
+    // ─── Water init + simulation ─────────────────────────────────────────────
+    function initWater() {
+      waterRestY      = H * 0.87;
+      waterY          = new Float32Array(WATER_COLS);
+      waterV          = new Float32Array(WATER_COLS);
+      sprayParticles  = [];
+    }
+
+    function splashWater(xPixel, strength) {
+      const col    = Math.round((xPixel / W) * (WATER_COLS - 1));
+      const radius = 7;
+      for (let i = Math.max(0, col - radius); i <= Math.min(WATER_COLS - 1, col + radius); i++) {
+        waterV[i] += strength * (1 - Math.abs(i - col) / (radius + 1));
+      }
+    }
+
+    function emitSpray(x, surfaceY, ballVy) {
+      const count = Math.min(12, 4 + Math.floor(Math.abs(ballVy) * 0.55));
+      for (let k = 0; k < count; k++) {
+        const angle = -Math.PI * 0.5 + (Math.random() - 0.5) * Math.PI * 0.75;
+        const spd   = 2 + Math.random() * Math.abs(ballVy) * 0.7;
+        sprayParticles.push({
+          x:    x + (Math.random() - 0.5) * 26,
+          y:    surfaceY,
+          vx:   Math.cos(angle) * spd,
+          vy:   Math.sin(angle) * spd,
+          life: 1.0,
+          r:    1.2 + Math.random() * 2.8,
+        });
+      }
+    }
+
+    function updateWater() {
+      for (let i = 0; i < WATER_COLS; i++) {
+        waterV[i] += -0.022 * waterY[i];  // spring toward rest
+        waterV[i] *= 0.94;                // damping
+        waterY[i] += waterV[i];
+      }
+      // Wave propagation — two passes for stability
+      for (let pass = 0; pass < 2; pass++) {
+        for (let i = 0; i < WATER_COLS - 1; i++) {
+          const diff    = 0.14 * (waterY[i] - waterY[i + 1]);
+          waterV[i]    -= diff;
+          waterV[i + 1] += diff;
+        }
+      }
+    }
+
+    function updateSpray() {
+      for (let i = sprayParticles.length - 1; i >= 0; i--) {
+        const p = sprayParticles[i];
+        p.vy   += 0.22;     // gravity on droplets
+        p.x    += p.vx;
+        p.y    += p.vy;
+        p.vx   *= 0.97;
+        p.life -= 0.024;
+        // Droplet re-enters water → tiny ripple
+        if (p.vy > 0 && waterY) {
+          const col = Math.max(0, Math.min(WATER_COLS - 1, Math.round((p.x / W) * (WATER_COLS - 1))));
+          if (p.y >= waterRestY + waterY[col]) {
+            splashWater(p.x, p.vy * p.r * 0.09);
+            sprayParticles.splice(i, 1);
+            continue;
+          }
+        }
+        if (p.life <= 0) sprayParticles.splice(i, 1);
+      }
     }
 
     // ─── Caustics init ────────────────────────────────────────────────────────
@@ -247,6 +323,19 @@
         if (b.x < b.r)       { b.x = b.r;       b.vx *= -0.9; }
         if (b.x > W - b.r)   { b.x = W - b.r;   b.vx *= -0.9; }
         if (b.y < b.r)       { b.y = b.r;        b.vy *= -0.9; }
+        // Water surface collision — ball splashes and sinks
+        if (waterY) {
+          const wCol    = Math.max(0, Math.min(WATER_COLS - 1, Math.round((b.x / W) * (WATER_COLS - 1))));
+          const surfaceY = waterRestY + waterY[wCol];
+          if (b.vy > 0 && b.y + b.r * 0.5 >= surfaceY) {
+            splashWater(b.x, b.vy * b.r * 0.30);
+            emitSpray(b.x, surfaceY, b.vy);
+            balls.splice(i, 1);
+            if (balls.length === 0) spawnBall();
+            continue;
+          }
+        }
+
         if (b.y > H + 80)    {
           balls.splice(i, 1);
           if (balls.length === 0) spawnBall();
@@ -300,6 +389,8 @@
       updateLeaves();
       updateBalls();
       updateParticles();
+      updateWater();
+      updateSpray();
     }
 
     // ─── Audio ───────────────────────────────────────────────────────────────
@@ -537,12 +628,84 @@
       ctx.restore();
     }
 
+    function drawWater(now) {
+      if (!waterY) return;
+      const colW = W / (WATER_COLS - 1);
+
+      ctx.save();
+
+      // ── Water body (filled shape from surface to bottom edge) ──
+      ctx.beginPath();
+      ctx.moveTo(0, H);
+      ctx.lineTo(0, waterRestY + waterY[0]);
+      for (let i = 1; i < WATER_COLS; i++) {
+        const mx = (i - 0.5) * colW;
+        const my = waterRestY + (waterY[i - 1] + waterY[i]) * 0.5;
+        ctx.quadraticCurveTo((i - 1) * colW, waterRestY + waterY[i - 1], mx, my);
+      }
+      ctx.lineTo(W, waterRestY + waterY[WATER_COLS - 1]);
+      ctx.lineTo(W, H);
+      ctx.closePath();
+      const grad = ctx.createLinearGradient(0, waterRestY - 30, 0, H);
+      grad.addColorStop(0,   'hsla(188, 62%, 26%, 0.78)');
+      grad.addColorStop(0.28,'hsla(200, 68%, 16%, 0.91)');
+      grad.addColorStop(1,   'hsla(215, 75%, 8%,  0.97)');
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      // ── Surface glow line ──
+      ctx.beginPath();
+      ctx.moveTo(0, waterRestY + waterY[0]);
+      for (let i = 1; i < WATER_COLS; i++) {
+        const mx = (i - 0.5) * colW;
+        const my = waterRestY + (waterY[i - 1] + waterY[i]) * 0.5;
+        ctx.quadraticCurveTo((i - 1) * colW, waterRestY + waterY[i - 1], mx, my);
+      }
+      ctx.strokeStyle = 'hsla(188, 82%, 70%, 0.6)';
+      ctx.lineWidth   = 1.8;
+      ctx.shadowBlur  = 14;
+      ctx.shadowColor = 'hsla(188, 88%, 65%, 0.45)';
+      ctx.stroke();
+      ctx.shadowBlur  = 0;
+
+      // ── Animated shimmer specks on surface ──
+      const t = now * 0.001;
+      for (let i = 0; i < WATER_COLS; i += 3) {
+        const shimmer = Math.pow(Math.max(0, Math.sin(t * 2.3 + i * 0.45 + waterY[i] * 0.08)), 4);
+        if (shimmer < 0.28) continue;
+        ctx.globalAlpha = shimmer * 0.55;
+        ctx.fillStyle   = 'hsla(200, 95%, 90%, 1)';
+        ctx.beginPath();
+        ctx.arc(i * colW, waterRestY + waterY[i] - 1, 1.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
+      ctx.restore();
+    }
+
+    function drawSpray() {
+      for (const p of sprayParticles) {
+        ctx.save();
+        ctx.globalAlpha = p.life * 0.88;
+        ctx.shadowBlur  = 7;
+        ctx.shadowColor = 'hsla(194, 85%, 78%, 0.8)';
+        ctx.fillStyle   = 'hsla(194, 65%, 90%, 1)';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, Math.max(0.4, p.r * p.life), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
     function draw(now) {
       drawBackground(now);
       for (const leaf of leaves) drawLeaf(leaf, now);
       for (const leaf of leaves) drawAngleIndicator(leaf, now);
       drawParticles();
       for (const b of balls) drawBall(b);
+      drawWater(now);
+      drawSpray();
       drawEmitter(now);
     }
 
@@ -806,6 +969,10 @@
         b.trail = b.trail.map(pt => ({ x: pt.x * scaleX, y: pt.y * scaleY }));
       }
       initCaustics();
+      if (waterY) {
+        waterRestY = H * 0.87;
+        for (let i = 0; i < WATER_COLS; i++) waterY[i] *= scaleY;
+      }
     }
 
     // ─── Begin gate ──────────────────────────────────────────────────────────
@@ -830,6 +997,7 @@
       initLeaves();
       resetEmitter();
       initCaustics();
+      initWater();
       spawnBall();
       setupInput();
       setupKeyboard();
