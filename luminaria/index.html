@@ -52,6 +52,66 @@
       return dirs[Math.floor(Math.random() * 4)];
     }
 
+    // Embed several secret closed loops into an otherwise random grid.
+    // Each loop is a random walk that closes back on itself — arrows look like
+    // noise until a plankton enters one and suddenly starts looping.
+    const DELTA_TO_DIR = { '0,-1': 'N', '1,0': 'E', '0,1': 'S', '-1,0': 'W' };
+
+    function embedLoops() {
+      const dirs    = ['N', 'E', 'S', 'W'];
+      const claimed = new Set();   // cells already belonging to a loop
+      const shuffle = a => a.sort(() => Math.random() - 0.5);
+
+      for (let attempt = 0; attempt < 12; attempt++) {
+        const sc = 1 + Math.floor(Math.random() * (COLS - 2));
+        const sr = 1 + Math.floor(Math.random() * (ROWS - 2));
+        if (claimed.has(`${sc},${sr}`)) continue;
+
+        const path    = [[sc, sr]];
+        const visited = new Set([`${sc},${sr}`]);
+        let col = sc, row = sr, closed = false;
+
+        for (let step = 0; step < 22; step++) {
+          let moved = false;
+          for (const dir of shuffle([...dirs])) {
+            const [dc, dr] = DIR_DELTAS[dir];
+            const nc = col + dc, nr = row + dr;
+            // Close the loop back to start (need at least 5 cells for interest)
+            if (nc === sc && nr === sr && path.length >= 5) {
+              closed = true; moved = true; break;
+            }
+            // Extend walk — avoid grid edges, visited cells, other loops
+            if (nc > 0 && nc < COLS - 1 && nr > 0 && nr < ROWS - 1
+                && !visited.has(`${nc},${nr}`) && !claimed.has(`${nc},${nr}`)) {
+              col = nc; row = nr;
+              path.push([col, row]);
+              visited.add(`${col},${row}`);
+              moved = true; break;
+            }
+          }
+          if (!moved || closed) break;
+        }
+
+        if (closed) {
+          // Write loop arrows into grid; mark cells as claimed
+          for (let i = 0; i < path.length; i++) {
+            const [c, r]   = path[i];
+            const [nc, nr] = path[(i + 1) % path.length];
+            const dir      = DELTA_TO_DIR[`${nc - c},${nr - r}`];
+            const angle    = DIR_ANGLES[dir];
+            const cell     = grid[r][c];
+            // Animate from current displayed angle (smooth even on R-key re-embed)
+            const current  = Math.round(cell.animAngle / (Math.PI / 2));
+            const target   = angle / (Math.PI / 2);
+            const steps    = ((target - current) % 4 + 4) % 4;
+            cell.dir         = dir;
+            cell.targetAngle = cell.animAngle + steps * Math.PI / 2;
+            claimed.add(`${c},${r}`);
+          }
+        }
+      }
+    }
+
     function initGrid() {
       CELL = window.innerWidth < 768 ? 60 : 80;
       recomputeSpeed();
@@ -66,6 +126,7 @@
           return { dir, animAngle: angle, targetAngle: angle };
         })
       );
+      embedLoops();
     }
 
     function cellCenter(col, row) {
@@ -80,13 +141,14 @@
         for (let c = 0; c < COLS; c++) {
           const dir     = randomDir(r, c);
           grid[r][c].dir = dir;
-          // Rotate by the shortest path from current displayed angle to target
           const current = Math.round(grid[r][c].animAngle / (Math.PI / 2));
           const target  = DIR_ANGLES[dir] / (Math.PI / 2);
           const steps   = ((target - current) % 4 + 4) % 4;
           grid[r][c].targetAngle = grid[r][c].animAngle + steps * Math.PI / 2;
         }
       }
+      // Embed a fresh set of hidden loops after randomising
+      embedLoops();
     }
 
     // ─── Cell click ──────────────────────────────────────────────────────────
@@ -157,6 +219,7 @@
     }
 
     // Determine the next move for a plankton that just arrived at p.col/p.row.
+    // Loops are allowed; plankton fades after completing its loop 3 times.
     function advancePlankton(p) {
       const dir = grid[p.row][p.col].dir;
       const [dc, dr] = DIR_DELTAS[dir];
@@ -167,7 +230,28 @@
         p.state = 'fading';
         return;
       }
-      if (p.visitedCells.has(`${nc},${nr}`)) {
+
+      // Block 2-cell back-and-forth — visually distracting, musically useless
+      const [rdc, rdr] = DIR_DELTAS[grid[nr][nc].dir];
+      if (nc + rdc === p.col && nr + rdr === p.row) {
+        p.state = 'fading';
+        return;
+      }
+
+      p.totalMoves++;
+
+      const key = `${nc},${nr}`;
+      if (p.loopMoveTarget === null && p.visitedCells.has(key)) {
+        // First revisit: measure the loop and schedule fade after 3 passes
+        const anchorIdx = p.visitedList.indexOf(key);
+        const loopLen   = p.visitedList.length - anchorIdx;
+        p.loopMoveTarget = p.totalMoves + loopLen * 3;
+      }
+      if (!p.visitedCells.has(key)) {
+        p.visitedCells.add(key);
+        p.visitedList.push(key);
+      }
+      if (p.loopMoveTarget !== null && p.totalMoves >= p.loopMoveTarget) {
         p.state = 'fading';
         return;
       }
@@ -202,6 +286,13 @@
 
     // Snap idle plankton to nearest grid cell and start it moving
     function activatePlankton(p) {
+      // If too many are already alive, gracefully retire the most-travelled one
+      const alive = plankton.filter(q => q.state === 'alive');
+      if (alive.length >= 4) {
+        alive.sort((a, b) => b.totalMoves - a.totalMoves);
+        alive[0].state = 'fading';
+      }
+
       const col = Math.max(0, Math.min(COLS - 1, Math.floor((p.x - offsetX) / CELL)));
       const row = Math.max(0, Math.min(ROWS - 1, Math.floor((p.y - offsetY) / CELL)));
       const usedIdx = new Set(plankton.filter(q => q.state === 'alive').map(q => q.synthIndex));
@@ -212,7 +303,10 @@
       p.col = col; p.row = row;
       p.targetCol = col; p.targetRow = row;
       p.targetX = c.x; p.targetY = c.y;
-      p.visitedCells = new Set([`${col},${row}`]);
+      p.visitedCells    = new Set([`${col},${row}`]);
+      p.visitedList     = [`${col},${row}`];
+      p.totalMoves      = 0;
+      p.loopMoveTarget  = null;
       p.state = 'alive';
       p.opacity = 1.0;
       p.trail = [];
@@ -523,7 +617,10 @@
             dragPlankton.targetRow = row;
             dragPlankton.targetX   = c.x;
             dragPlankton.targetY   = c.y;
-            dragPlankton.visitedCells = new Set([`${col},${row}`]);
+            dragPlankton.visitedCells   = new Set([`${col},${row}`]);
+            dragPlankton.visitedList    = [`${col},${row}`];
+            dragPlankton.totalMoves     = 0;
+            dragPlankton.loopMoveTarget = null;
             dragPlankton.state     = 'alive';
             dragPlankton.opacity   = 1.0;
             dragPlankton.trail     = [];
