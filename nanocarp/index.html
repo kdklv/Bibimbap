@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>nanocarp</title>
+  <link rel="stylesheet" href="../shared/theme.css">
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div class="begin-screen" id="begin">touch to begin</div>
+  <script src="../shared/audio.js"></script>
+  <script>
+    const canvas = document.getElementById('canvas');
+    let ctx, W, H;
+
+    function setupCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      W = rect.width; H = rect.height;
+      canvas.width = W * dpr; canvas.height = H * dpr;
+      ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+    }
+
+    // ─── State ────────────────────────────────────────────────────────────────
+    let fish = [];
+    let ripples = [];
+    let currentScale = 'wholeTone';
+
+    const FISH_COUNT = 40;
+    const MAX_RIPPLES = 6;
+    const MAX_SPEED = 2.0;
+    const MIN_SPEED = 0.3;
+
+    function makeFish(cx, cy, spread) {
+      const angle = Math.random() * Math.PI * 2;
+      const spd   = MIN_SPEED + Math.random() * 0.8;
+      return {
+        x: cx + (Math.random() - 0.5) * spread,
+        y: cy + (Math.random() - 0.5) * spread,
+        vx: Math.cos(angle) * spd,
+        vy: Math.sin(angle) * spd,
+        angle,
+        size: 6 + Math.random() * 3,
+        hue:  170 + Math.random() * 40,
+        dartVx: 0, dartVy: 0,
+        dartFrames: 0,
+      };
+    }
+
+    function initFish() {
+      // Default: gentle cluster near centre
+      fish = Array.from({ length: FISH_COUNT }, () => makeFish(W * 0.5, H * 0.5, Math.min(W, H) * 0.45));
+    }
+
+    function scatterFish() {
+      for (const f of fish) {
+        f.x = W * 0.1 + Math.random() * W * 0.8;
+        f.y = H * 0.1 + Math.random() * H * 0.8;
+        const angle = Math.random() * Math.PI * 2;
+        const spd   = MIN_SPEED + Math.random() * 0.8;
+        f.vx = Math.cos(angle) * spd;
+        f.vy = Math.sin(angle) * spd;
+        f.dartFrames = 0;
+      }
+    }
+
+    // ─── Audio ────────────────────────────────────────────────────────────────
+    let audioCtx = null, masterOut = null, convolver = null;
+
+    function initAudio() {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      audioCtx.resume();
+
+      masterOut = audioCtx.createGain();
+      masterOut.gain.value = 0.32;
+      masterOut.connect(audioCtx.destination);
+
+      // Pond reverb
+      const sr  = audioCtx.sampleRate;
+      const len = Math.floor(sr * 2.8);
+      const buf = audioCtx.createBuffer(2, len, sr);
+      for (let c = 0; c < 2; c++) {
+        const ch = buf.getChannelData(c);
+        for (let i = 0; i < len; i++)
+          ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 1.6);
+      }
+      convolver = audioCtx.createConvolver();
+      convolver.buffer = buf;
+      const wet = audioCtx.createGain();
+      wet.gain.value = 0.5;
+      convolver.connect(wet);
+      wet.connect(masterOut);
+    }
+
+    // FM bell tone — carrier sine, modulated at harmonicity*freq for metallic decay
+    function playNote(midi, vol = 0.12, dur = 0.55) {
+      if (!audioCtx) return;
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      const freq = 440 * Math.pow(2, (midi - 69) / 12);
+      const now  = audioCtx.currentTime;
+
+      const carrier  = audioCtx.createOscillator();
+      const mod      = audioCtx.createOscillator();
+      const modDepth = audioCtx.createGain();
+      const env      = audioCtx.createGain();
+
+      carrier.type = 'sine';
+      carrier.frequency.value = freq;
+      mod.type = 'sine';
+      mod.frequency.value = freq * 3.5;
+      modDepth.gain.value = freq * 0.55;
+
+      mod.connect(modDepth);
+      modDepth.connect(carrier.frequency);
+
+      env.gain.setValueAtTime(0.0001, now);
+      env.gain.linearRampToValueAtTime(vol, now + 0.012);
+      env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+
+      carrier.connect(env);
+      env.connect(masterOut);
+      env.connect(convolver);
+
+      carrier.start(now); mod.start(now);
+      carrier.stop(now + dur + 0.05); mod.stop(now + dur + 0.05);
+    }
+
+    // ─── Boids ────────────────────────────────────────────────────────────────
+    function boidForces(f, all) {
+      let sx=0, sy=0, ax=0, ay=0, cx=0, cy=0, sn=0, an=0, cn=0;
+      for (const o of all) {
+        if (o === f) continue;
+        const dx = o.x - f.x, dy = o.y - f.y;
+        const d  = Math.hypot(dx, dy);
+        if (d < 30)  { sx -= dx/d; sy -= dy/d; sn++; }
+        if (d < 80)  { ax += o.vx; ay += o.vy; an++; }
+        if (d < 100) { cx += o.x;  cy += o.y;  cn++; }
+      }
+      let fx = 0, fy = 0;
+      if (sn) { fx += (sx/sn) * 1.5;              fy += (sy/sn) * 1.5; }
+      if (an) { fx += (ax/an - f.vx) * 0.8;       fy += (ay/an - f.vy) * 0.8; }
+      if (cn) { fx += (cx/cn - f.x)  * 0.0005;    fy += (cy/cn - f.y)  * 0.0005; }
+      const m = 60;
+      if (f.x < m)   fx += 0.5;
+      if (f.x > W-m) fx -= 0.5;
+      if (f.y < m)   fy += 0.5;
+      if (f.y > H-m) fy -= 0.5;
+      return { fx, fy };
+    }
+
+    // ─── Update ───────────────────────────────────────────────────────────────
+    function updateFish() {
+      for (const f of fish) {
+        const { fx, fy } = boidForces(f, fish);
+        f.vx += fx * 0.06;
+        f.vy += fy * 0.06;
+        if (f.dartFrames > 0) f.dartFrames--;
+
+        const spd = Math.hypot(f.vx, f.vy);
+        if (spd > MAX_SPEED) { f.vx *= MAX_SPEED/spd; f.vy *= MAX_SPEED/spd; }
+        if (spd < MIN_SPEED && spd > 0.001) { f.vx *= MIN_SPEED/spd; f.vy *= MIN_SPEED/spd; }
+        if (spd < 0.001)     { f.vx = MIN_SPEED; f.vy = 0; }
+
+        f.x += f.vx;
+        f.y += f.vy;
+        f.angle = Math.atan2(f.vy, f.vx);
+      }
+    }
+
+    function updateRipples() {
+      for (let i = ripples.length - 1; i >= 0; i--) {
+        const rpl = ripples[i];
+        rpl.r += rpl.speed;
+        rpl.opacity = Math.max(0, 1 - rpl.r / rpl.maxR);
+
+        for (const f of fish) {
+          if (rpl.triggered.has(f)) continue;
+          const d = Math.hypot(f.x - rpl.x, f.y - rpl.y);
+          if (d > rpl.r - 8 && d < rpl.r + 8) {
+            rpl.triggered.add(f);
+            const a = Math.atan2(f.y - rpl.y, f.x - rpl.x);
+            f.vx += Math.cos(a) * 5;
+            f.vy += Math.sin(a) * 5;
+            f.dartFrames = 20;
+            playNote(Audio.noteFromY(f.y, H, currentScale, 2), 0.08, 0.45);
+          }
+        }
+
+        if (rpl.r >= rpl.maxR) ripples.splice(i, 1);
+      }
+    }
+
+    // ─── Draw ─────────────────────────────────────────────────────────────────
+    function drawFish(f) {
+      ctx.save();
+      ctx.translate(f.x, f.y);
+      ctx.rotate(f.angle);
+
+      // Cheap glow — oversized faint circle, no shadowBlur
+      ctx.beginPath();
+      ctx.arc(0, 0, f.size * 2, 0, Math.PI * 2);
+      ctx.fillStyle = `hsla(${f.hue}, 50%, 60%, 0.12)`;
+      ctx.fill();
+
+      // Body
+      const lit = f.dartFrames > 0 ? 75 : 55;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, f.size, f.size * 0.45, 0, 0, Math.PI * 2);
+      ctx.fillStyle = `hsl(${f.hue}, 50%, ${lit}%)`;
+      ctx.fill();
+
+      // Forked tail
+      ctx.beginPath();
+      ctx.moveTo(-f.size * 0.9, 0);
+      ctx.lineTo(-f.size * 1.7, -f.size * 0.55);
+      ctx.lineTo(-f.size * 1.7,  f.size * 0.55);
+      ctx.closePath();
+      ctx.fillStyle = `hsl(${f.hue}, 45%, ${lit - 8}%)`;
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function drawRipple(rpl) {
+      ctx.save();
+      // Three concentric rings for wave-packet look
+      for (let k = -1; k <= 1; k++) {
+        const r = rpl.r + k * 6;
+        if (r <= 0) continue;
+        ctx.beginPath();
+        ctx.arc(rpl.x, rpl.y, r, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(160, 210, 230, ${rpl.opacity * (0.65 - Math.abs(k) * 0.22)})`;
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function draw() {
+      ctx.fillStyle = 'rgba(8, 12, 20, 0.25)';
+      ctx.fillRect(0, 0, W, H);
+
+      for (const rpl of ripples) drawRipple(rpl);
+      for (const f of fish)    drawFish(f);
+    }
+
+    function loop() { updateFish(); updateRipples(); draw(); requestAnimationFrame(loop); }
+
+    // ─── Input ────────────────────────────────────────────────────────────────
+    function spawnRipple(x, y) {
+      if (ripples.length >= MAX_RIPPLES) ripples.shift();
+      ripples.push({ x, y, r: 0, maxR: 280, speed: 2.5, opacity: 1.0, triggered: new Set() });
+      playNote(Audio.noteFromY(y, H, currentScale, 2, 48), 0.18, 0.9);
+    }
+
+    function canvasPos(e) {
+      const r = canvas.getBoundingClientRect();
+      return { x: e.clientX - r.left, y: e.clientY - r.top };
+    }
+
+    function setupInput() {
+      canvas.addEventListener('pointerdown', e => {
+        e.preventDefault();
+        const p = canvasPos(e);
+        spawnRipple(p.x, p.y);
+      });
+    }
+
+    function setupKeyboard() {
+      document.addEventListener('keydown', e => {
+        switch (e.code) {
+          case 'Space':   e.preventDefault(); spawnRipple(W/2, H/2); break;
+          case 'KeyR':    scatterFish();       break;
+          case 'KeyC':    initFish();          break;
+          case 'Digit1':  currentScale = 'gamelan';    break;
+          case 'Digit2':  currentScale = 'pentatonic'; break;
+          case 'Digit3':  currentScale = 'wholeTone';  break;
+          case 'Digit4':  currentScale = 'major';      break;
+          case 'Digit5':  currentScale = 'minor';      break;
+        }
+      });
+    }
+
+    function onResize() {
+      if (!W || !H) return;
+      const rect = canvas.getBoundingClientRect();
+      const ox = rect.width / W, oy = rect.height / H;
+      setupCanvas();
+      for (const f   of fish)    { f.x   *= ox; f.y   *= oy; }
+      for (const rpl of ripples) { rpl.x *= ox; rpl.y *= oy; }
+    }
+
+    const beginEl = document.getElementById('begin');
+    function begin() {
+      initAudio();
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && audioCtx && audioCtx.state === 'suspended')
+          audioCtx.resume();
+      });
+      window.addEventListener('pageshow', () => {
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      });
+
+      beginEl.style.opacity = '0';
+      beginEl.style.pointerEvents = 'none';
+      setTimeout(() => beginEl.remove(), 700);
+
+      setupCanvas();
+      initFish();
+      setupInput();
+      setupKeyboard();
+      window.addEventListener('resize', onResize);
+      requestAnimationFrame(loop);
+    }
+    document.addEventListener('pointerdown', begin, { once: true });
+  </script>
+</body>
+</html>
