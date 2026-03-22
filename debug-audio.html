@@ -7,29 +7,16 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body {
-      background: #080c14;
-      color: #e8eaf0;
+      background: #080c14; color: #e8eaf0;
       font-family: ui-monospace, 'Menlo', monospace;
-      font-size: 13px;
-      height: 100%;
-      overflow: hidden;
+      font-size: 13px; height: 100%; overflow: hidden;
     }
-
     #log {
-      position: fixed;
-      inset: 0;
-      bottom: 80px;
-      overflow-y: auto;
-      padding: 12px 14px;
+      position: fixed; inset: 0; bottom: 116px;
+      overflow-y: auto; padding: 12px 14px;
       -webkit-overflow-scrolling: touch;
     }
-
-    .entry {
-      padding: 3px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.05);
-      line-height: 1.5;
-      word-break: break-all;
-    }
+    .entry { padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); line-height: 1.5; word-break: break-all; }
     .entry.info  { color: #a0c4ff; }
     .entry.ok    { color: #6be89b; }
     .entry.warn  { color: #ffd97d; }
@@ -37,262 +24,285 @@
     .entry.muted { color: rgba(232,234,240,0.35); }
     .ts { color: rgba(255,255,255,0.25); margin-right: 6px; }
 
-    #controls {
-      position: fixed;
-      bottom: 0; left: 0; right: 0;
-      height: 80px;
-      display: flex;
-      gap: 8px;
-      padding: 10px 12px;
-      background: rgba(8,12,20,0.92);
-      border-top: 1px solid rgba(255,255,255,0.08);
+    #meter {
+      position: fixed; bottom: 116px; left: 0; right: 0; height: 6px;
+      background: rgba(255,255,255,0.05);
+    }
+    #meter-bar {
+      height: 100%; width: 0%; background: #6be89b;
+      transition: width 0.05s linear;
     }
 
+    #controls {
+      position: fixed; bottom: 0; left: 0; right: 0; height: 110px;
+      display: grid; grid-template-columns: 1fr 1fr 1fr;
+      gap: 7px; padding: 8px 10px;
+      background: rgba(8,12,20,0.95);
+      border-top: 1px solid rgba(255,255,255,0.08);
+    }
     button {
-      flex: 1;
-      background: rgba(160,196,255,0.12);
-      border: 1px solid rgba(160,196,255,0.3);
-      color: #a0c4ff;
-      font-family: inherit;
-      font-size: 12px;
-      border-radius: 6px;
-      cursor: pointer;
-      -webkit-tap-highlight-color: transparent;
-      touch-action: manipulation;
-      padding: 0 4px;
-      line-height: 1.3;
-      text-align: center;
+      background: rgba(160,196,255,0.10); border: 1px solid rgba(160,196,255,0.28);
+      color: #a0c4ff; font-family: inherit; font-size: 11px;
+      border-radius: 6px; cursor: pointer;
+      -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+      padding: 6px 4px; line-height: 1.3; text-align: center;
     }
     button:active { background: rgba(160,196,255,0.25); }
-    button.primary {
-      background: rgba(160,196,255,0.22);
-      border-color: rgba(160,196,255,0.6);
-      font-weight: 600;
-    }
+    button.primary { background: rgba(160,196,255,0.20); border-color: rgba(160,196,255,0.6); font-weight: 600; }
+    button.warn    { background: rgba(255,217,125,0.12); border-color: rgba(255,217,125,0.5); color: #ffd97d; }
   </style>
 </head>
 <body>
 
 <div id="log"></div>
+<div id="meter"><div id="meter-bar"></div></div>
 
 <div id="controls">
   <button class="primary" id="btn-init">1. Init Audio</button>
-  <button id="btn-play">2. Play Note</button>
-  <button id="btn-state">3. Check State</button>
+  <button id="btn-webaudio">2. WebAudio Note</button>
+  <button id="btn-htmlaudio">3. &lt;audio&gt; Beep</button>
+  <button id="btn-measure">4. Measure Signal</button>
+  <button id="btn-state">5. Check State</button>
   <button id="btn-clear">Clear</button>
 </div>
 
 <script>
-  // ─── Logger ──────────────────────────────────────────────────────────────
-  const logEl = document.getElementById('log');
-  const t0 = Date.now();
+// ─── Logger ────────────────────────────────────────────────────────────────
+const logEl    = document.getElementById('log');
+const meterBar = document.getElementById('meter-bar');
+const t0 = Date.now();
 
-  function log(msg, level = 'info') {
-    const ms = ((Date.now() - t0) / 1000).toFixed(2);
-    const div = document.createElement('div');
-    div.className = `entry ${level}`;
-    div.innerHTML = `<span class="ts">+${ms}s</span>${escHtml(msg)}`;
-    logEl.appendChild(div);
-    logEl.scrollTop = logEl.scrollHeight;
-    console.log(`[${level}] ${msg}`);
+function log(msg, level = 'info') {
+  const ms  = ((Date.now() - t0) / 1000).toFixed(2);
+  const div = document.createElement('div');
+  div.className = `entry ${level}`;
+  div.innerHTML = `<span class="ts">+${ms}s</span>${esc(msg)}`;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ─── Device info ───────────────────────────────────────────────────────────
+log('— device info —', 'muted');
+log(`UA: ${navigator.userAgent}`, 'muted');
+
+// Parse iOS version from UA
+const iosMatch = navigator.userAgent.match(/OS (\d+)[_.](\d+)/);
+if (iosMatch) {
+  log(`iOS version: ${iosMatch[1]}.${iosMatch[2]}`, 'info');
+} else if (/iPhone|iPad|iPod/.test(navigator.userAgent)) {
+  log('iOS detected but version not parsed', 'warn');
+} else {
+  log('not iOS', 'muted');
+}
+
+log(`maxTouchPoints: ${navigator.maxTouchPoints}`, 'muted');
+log(`AudioContext: ${'AudioContext' in window}`, 'AudioContext' in window ? 'ok' : 'error');
+log(`webkitAudioContext: ${'webkitAudioContext' in window}`, 'muted');
+
+// ─── State ────────────────────────────────────────────────────────────────
+let audioCtx  = null;
+let masterOut = null;
+let analyser  = null;
+let analyserData = null;
+let meterTimer = null;
+
+// ─── 1. Init ──────────────────────────────────────────────────────────────
+function initAudio() {
+  if (audioCtx) { log('already inited — state: ' + audioCtx.state, 'warn'); return; }
+
+  try {
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new Ctor();
+    log(`AudioContext created — state: ${audioCtx.state}`, audioCtx.state === 'running' ? 'ok' : 'warn');
+    log(`sampleRate: ${audioCtx.sampleRate} Hz`, 'muted');
+  } catch(e) { log(`new AudioContext() threw: ${e}`, 'error'); return; }
+
+  // resume() — called synchronously within gesture, log promise result
+  const p = audioCtx.resume();
+  if (p && p.then) {
+    p.then(() => log(`resume() resolved — state: ${audioCtx.state}`, audioCtx.state === 'running' ? 'ok' : 'warn'))
+     .catch(e => log(`resume() rejected: ${e}`, 'error'));
   }
 
-  function escHtml(s) {
-    return String(s)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
+  // Build graph:  masterOut → analyser → destination
+  try {
+    masterOut = audioCtx.createGain();
+    masterOut.gain.value = 0.7;
+
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    analyserData = new Float32Array(analyser.fftSize);
+
+    masterOut.connect(analyser);
+    analyser.connect(audioCtx.destination);
+
+    log('graph: osc→gain→masterOut→analyser→destination', 'ok');
+  } catch(e) { log(`graph setup threw: ${e}`, 'error'); }
+
+  // Background-resume handlers
+  document.addEventListener('visibilitychange', () => {
+    log(`visibilitychange hidden=${document.hidden} state=${audioCtx?.state}`, 'info');
+    if (!document.hidden && audioCtx?.state === 'suspended') audioCtx.resume();
+  });
+  window.addEventListener('pageshow', () => {
+    if (audioCtx?.state === 'suspended') audioCtx.resume();
+  });
+
+  log('init done — tap "2. WebAudio Note" to test', 'ok');
+  log('⚠️  if no sound: check mute switch & volume!', 'warn');
+}
+
+// ─── 2. WebAudio Note ──────────────────────────────────────────────────────
+function playWebAudio() {
+  if (!audioCtx) { log('run Init first', 'error'); return; }
+
+  log(`ctx state: ${audioCtx.state}  currentTime: ${audioCtx.currentTime.toFixed(4)}`, 'info');
+
+  if (audioCtx.state === 'suspended') {
+    log('suspended — calling resume() now', 'warn');
+    audioCtx.resume()
+      .then(() => log(`resumed — state: ${audioCtx.state}`, 'ok'))
+      .catch(e => log(`resume failed: ${e}`, 'error'));
   }
 
-  // ─── Device info (logged immediately, no gesture needed) ─────────────────
-  log('— device info —', 'muted');
-  log(`UA: ${navigator.userAgent}`, 'muted');
-  log(`platform: ${navigator.platform || '(none)'}`, 'muted');
-  log(`maxTouchPoints: ${navigator.maxTouchPoints}`, 'muted');
-  log(`devicePixelRatio: ${window.devicePixelRatio}`, 'muted');
-  log(`AudioContext: ${'AudioContext' in window ? 'yes' : 'NO'}`, 'AudioContext' in window ? 'ok' : 'error');
-  log(`webkitAudioContext: ${'webkitAudioContext' in window ? 'yes' : 'no'}`, 'muted');
-  log(`PointerEvent: ${'PointerEvent' in window ? 'yes' : 'NO'}`, 'PointerEvent' in window ? 'ok' : 'error');
-  log(`TouchEvent: ${'TouchEvent' in window ? 'yes' : 'no'}`, 'muted');
-  log('— tap "1. Init Audio" —', 'muted');
+  try {
+    const t    = audioCtx.currentTime;
+    // Schedule slightly ahead to avoid t=0 edge case on iOS
+    const start = Math.max(t, t + 0.05);
 
-  // ─── Audio state ─────────────────────────────────────────────────────────
-  let audioCtx = null;
-  let masterOut = null;
-  let convolver = null;
+    const osc  = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 440;
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.linearRampToValueAtTime(0.7, start + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.8);
+    osc.connect(gain);
+    gain.connect(masterOut);
+    osc.start(start);
+    osc.stop(start + 0.9);
+    osc.onended = () => log('osc.onended fired — note finished', 'ok');
 
-  // ─── Init ─────────────────────────────────────────────────────────────────
-  function initAudio() {
-    log('initAudio() called', 'info');
+    log(`osc.start(${start.toFixed(4)})  osc.stop(${(start+0.9).toFixed(4)})`, 'ok');
+    log('you should hear A4 (440 Hz) for ~0.8s', 'ok');
 
-    try {
-      const Ctor = window.AudioContext || window.webkitAudioContext;
-      if (!Ctor) { log('ERROR: no AudioContext constructor', 'error'); return; }
-      log(`using: ${Ctor === window.AudioContext ? 'AudioContext' : 'webkitAudioContext'}`, 'info');
+    // Start level meter
+    startMeter();
 
-      audioCtx = new Ctor();
-      log(`created — state: ${audioCtx.state}`, audioCtx.state === 'running' ? 'ok' : 'warn');
-      log(`sampleRate: ${audioCtx.sampleRate} Hz`, 'muted');
+  } catch(e) { log(`playWebAudio threw: ${e}`, 'error'); }
+}
 
-    } catch (err) {
-      log(`new AudioContext() threw: ${err}`, 'error');
-      return;
+// ─── 3. <audio> element test ───────────────────────────────────────────────
+// Generate a minimal WAV in-memory so we don't need a server
+function playHtmlAudio() {
+  log('— <audio> element test —', 'muted');
+  try {
+    const wav  = makeSineWav(440, 1.0);
+    const url  = URL.createObjectURL(wav);
+    const el   = new Audio(url);
+    el.oncanplaythrough = () => log('<audio> canplaythrough', 'info');
+    el.onplay  = () => log('<audio> play event fired', 'ok');
+    el.onended = () => { log('<audio> ended — did you hear it?', 'ok'); URL.revokeObjectURL(url); };
+    el.onerror = (e) => log(`<audio> error: ${el.error?.message ?? e}`, 'error');
+    const pp = el.play();
+    if (pp && pp.then) {
+      pp.then(() => log('<audio>.play() promise resolved', 'ok'))
+        .catch(e => log(`<audio>.play() rejected: ${e}`, 'error'));
     }
+    log('HTMLAudioElement.play() called — listen for beep', 'info');
+  } catch(e) { log(`<audio> test threw: ${e}`, 'error'); }
+}
 
-    try {
-      const p = audioCtx.resume();
-      log(`resume() called — returned: ${p}`, 'info');
-
-      if (p && typeof p.then === 'function') {
-        p.then(() => {
-          log(`resume() promise resolved — state: ${audioCtx.state}`, audioCtx.state === 'running' ? 'ok' : 'warn');
-        }).catch(err => {
-          log(`resume() promise rejected: ${err}`, 'error');
-        });
-      } else {
-        log('resume() did not return a Promise (old WebKit)', 'warn');
-      }
-    } catch (err) {
-      log(`resume() threw: ${err}`, 'error');
-    }
-
-    // Build minimal graph
-    try {
-      masterOut = audioCtx.createGain();
-      masterOut.gain.value = 0.6;
-      masterOut.connect(audioCtx.destination);
-
-      const sr = audioCtx.sampleRate;
-      const len = Math.floor(sr * 1.5);
-      const buf = audioCtx.createBuffer(2, len, sr);
-      for (let c = 0; c < 2; c++) {
-        const ch = buf.getChannelData(c);
-        for (let i = 0; i < len; i++)
-          ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.2);
-      }
-      convolver = audioCtx.createConvolver();
-      convolver.buffer = buf;
-      const wet = audioCtx.createGain();
-      wet.gain.value = 0.35;
-      convolver.connect(wet);
-      wet.connect(masterOut);
-
-      log('audio graph built OK', 'ok');
-    } catch (err) {
-      log(`graph setup threw: ${err}`, 'error');
-    }
-
-    // Attach visibilitychange listener
-    document.addEventListener('visibilitychange', () => {
-      log(`visibilitychange — hidden: ${document.hidden}, ctx state: ${audioCtx ? audioCtx.state : 'null'}`, 'info');
-      if (!document.hidden && audioCtx && audioCtx.state === 'suspended') {
-        log('attempting resume() on visibility restore...', 'warn');
-        audioCtx.resume()
-          .then(() => log(`resumed — state: ${audioCtx.state}`, 'ok'))
-          .catch(err => log(`resume failed: ${err}`, 'error'));
-      }
-    });
-    window.addEventListener('pageshow', () => {
-      log(`pageshow — ctx state: ${audioCtx ? audioCtx.state : 'null'}`, 'info');
-      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-    });
-
-    log('init complete', 'ok');
+// Minimal PCM WAV encoder
+function makeSineWav(freq, duration, sr = 44100) {
+  const n   = Math.floor(sr * duration);
+  const buf = new ArrayBuffer(44 + n * 2);
+  const v   = new DataView(buf);
+  const str = (off, s) => { for (let i=0;i<s.length;i++) v.setUint8(off+i, s.charCodeAt(i)); };
+  str(0,  'RIFF'); v.setUint32(4,  36 + n*2, true);
+  str(8,  'WAVE'); str(12, 'fmt ');
+  v.setUint32(16, 16, true);   // chunk size
+  v.setUint16(20, 1,  true);   // PCM
+  v.setUint16(22, 1,  true);   // mono
+  v.setUint32(24, sr, true);   // sample rate
+  v.setUint32(28, sr*2, true); // byte rate
+  v.setUint16(32, 2,  true);   // block align
+  v.setUint16(34, 16, true);   // bits per sample
+  str(36, 'data'); v.setUint32(40, n*2, true);
+  for (let i=0; i<n; i++) {
+    // Fade in/out to avoid clicks
+    const env = Math.min(i/sr*4, 1, (n-i)/sr*4);
+    const s   = Math.sin(2*Math.PI*freq*i/sr) * env * 0.6;
+    v.setInt16(44 + i*2, Math.round(s * 32767), true);
   }
+  return new Blob([buf], { type: 'audio/wav' });
+}
 
-  // ─── Play note ───────────────────────────────────────────────────────────
-  function playTestNote() {
-    if (!audioCtx) { log('no audioCtx — run init first', 'error'); return; }
+// ─── 4. Measure signal ────────────────────────────────────────────────────
+function measureSignal() {
+  if (!analyser) { log('run Init first', 'error'); return; }
+  log('— reading AnalyserNode (10 samples × 200ms) —', 'muted');
+  let count = 0;
+  const iv = setInterval(() => {
+    analyser.getFloatTimeDomainData(analyserData);
+    let peak = 0;
+    for (let i = 0; i < analyserData.length; i++)
+      peak = Math.max(peak, Math.abs(analyserData[i]));
+    const dB = peak > 0 ? (20 * Math.log10(peak)).toFixed(1) : '-∞';
+    const bar = Math.min(100, peak * 200);
+    meterBar.style.width = bar + '%';
+    meterBar.style.background = peak > 0.01 ? '#6be89b' : '#ff6b6b';
+    const level = peak > 0.001 ? 'ok' : (peak > 0 ? 'warn' : 'error');
+    log(`peak: ${peak.toFixed(6)}  (${dB} dBFS)  ${peak > 0.001 ? '✓ SIGNAL' : peak > 0 ? '~ weak' : '✗ SILENCE'}`, level);
+    if (++count >= 10) clearInterval(iv);
+  }, 200);
+}
 
-    log(`playNote() — ctx state: ${audioCtx.state}`, audioCtx.state === 'running' ? 'info' : 'warn');
+function startMeter() {
+  if (meterTimer) clearInterval(meterTimer);
+  let ticks = 0;
+  meterTimer = setInterval(() => {
+    if (!analyser) return;
+    analyser.getFloatTimeDomainData(analyserData);
+    let peak = 0;
+    for (let i = 0; i < analyserData.length; i++) peak = Math.max(peak, Math.abs(analyserData[i]));
+    meterBar.style.width = Math.min(100, peak * 300) + '%';
+    meterBar.style.background = peak > 0.01 ? '#6be89b' : (peak > 0 ? '#ffd97d' : '#ff6b6b');
+    if (++ticks > 40) { clearInterval(meterTimer); meterTimer = null; meterBar.style.width = '0%'; }
+  }, 50);
+}
 
-    if (audioCtx.state === 'suspended') {
-      log('context suspended — calling resume() before note', 'warn');
-      audioCtx.resume()
-        .then(() => log(`resumed — state: ${audioCtx.state}`, 'ok'))
-        .catch(err => log(`resume failed: ${err}`, 'error'));
-    }
-
-    try {
-      const freq = 440;
-      const t = audioCtx.currentTime;
-      log(`currentTime: ${t.toFixed(4)}`, 'muted');
-
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0.0001, t);
-      gain.gain.linearRampToValueAtTime(0.28, t + 0.04);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.5);
-
-      osc.connect(gain);
-      gain.connect(masterOut);
-      if (convolver) gain.connect(convolver);
-
-      osc.start(t);
-      osc.stop(t + 0.6);
-
-      osc.onended = () => log('oscillator ended (A4, 440 Hz)', 'ok');
-      log('oscillator started — you should hear A4 (440 Hz)', 'ok');
-
-    } catch (err) {
-      log(`playNote threw: ${err}`, 'error');
-    }
+// ─── 5. State snapshot ────────────────────────────────────────────────────
+function checkState() {
+  log('— state snapshot —', 'muted');
+  if (!audioCtx) { log('audioCtx: null', 'warn'); return; }
+  log(`state: ${audioCtx.state}`, audioCtx.state === 'running' ? 'ok' : 'warn');
+  log(`currentTime: ${audioCtx.currentTime.toFixed(4)}`, 'muted');
+  log(`sampleRate: ${audioCtx.sampleRate}`, 'muted');
+  log(`document.hidden: ${document.hidden}`, 'muted');
+  if (analyser) {
+    analyser.getFloatTimeDomainData(analyserData);
+    let peak = 0;
+    for (let i = 0; i < analyserData.length; i++) peak = Math.max(peak, Math.abs(analyserData[i]));
+    log(`analyser peak right now: ${peak.toFixed(6)}`, peak > 0.001 ? 'ok' : 'muted');
   }
+}
 
-  // ─── State dump ──────────────────────────────────────────────────────────
-  function checkState() {
-    log('— state snapshot —', 'muted');
-    if (!audioCtx) {
-      log('audioCtx: null', 'warn');
-      return;
-    }
-    log(`audioCtx.state: ${audioCtx.state}`, audioCtx.state === 'running' ? 'ok' : 'warn');
-    log(`audioCtx.currentTime: ${audioCtx.currentTime.toFixed(4)}`, 'muted');
-    log(`audioCtx.sampleRate: ${audioCtx.sampleRate}`, 'muted');
-    log(`document.hidden: ${document.hidden}`, 'muted');
-    try {
-      // Try creating a dummy node — throws if context is in bad state
-      const g = audioCtx.createGain();
-      g.disconnect();
-      log('createGain(): OK', 'ok');
-    } catch (err) {
-      log(`createGain() threw: ${err}`, 'error');
-    }
-  }
+// ─── Buttons ──────────────────────────────────────────────────────────────
+document.getElementById('btn-init').addEventListener('pointerdown', e => { e.preventDefault(); initAudio(); });
+document.getElementById('btn-webaudio').addEventListener('pointerdown', e => { e.preventDefault(); playWebAudio(); });
+document.getElementById('btn-htmlaudio').addEventListener('pointerdown', e => { e.preventDefault(); playHtmlAudio(); });
+document.getElementById('btn-measure').addEventListener('pointerdown', e => { e.preventDefault(); measureSignal(); });
+document.getElementById('btn-state').addEventListener('pointerdown', e => { e.preventDefault(); checkState(); });
+document.getElementById('btn-clear').addEventListener('pointerdown', e => {
+  e.preventDefault(); logEl.innerHTML = ''; log('cleared', 'muted');
+});
 
-  // ─── Buttons ─────────────────────────────────────────────────────────────
-  document.getElementById('btn-init').addEventListener('pointerdown', e => {
-    e.preventDefault();
-    log('— btn: Init Audio (pointerdown) —', 'muted');
-    initAudio();
-  });
-
-  document.getElementById('btn-play').addEventListener('pointerdown', e => {
-    e.preventDefault();
-    log('— btn: Play Note (pointerdown) —', 'muted');
-    playTestNote();
-  });
-
-  document.getElementById('btn-state').addEventListener('pointerdown', e => {
-    e.preventDefault();
-    checkState();
-  });
-
-  document.getElementById('btn-clear').addEventListener('pointerdown', e => {
-    e.preventDefault();
-    logEl.innerHTML = '';
-    log('cleared', 'muted');
-  });
-
-  // Global error catcher
-  window.addEventListener('error', e => {
-    log(`uncaught error: ${e.message} (${e.filename}:${e.lineno})`, 'error');
-  });
-  window.addEventListener('unhandledrejection', e => {
-    log(`unhandled promise rejection: ${e.reason}`, 'error');
-  });
+window.addEventListener('error', e => log(`uncaught: ${e.message} (${e.filename}:${e.lineno})`, 'error'));
+window.addEventListener('unhandledrejection', e => log(`unhandled rejection: ${e.reason}`, 'error'));
 </script>
 </body>
 </html>
