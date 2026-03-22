@@ -13,7 +13,6 @@
   <script>
     const canvas = document.getElementById('canvas');
     let ctx, W, H;
-    let vignetteGrad = null;
 
     function setupCanvas() {
       const dpr = window.devicePixelRatio || 1;
@@ -22,28 +21,16 @@
       canvas.width = W * dpr; canvas.height = H * dpr;
       ctx = canvas.getContext('2d');
       ctx.scale(dpr, dpr);
-      buildVignette();
-    }
-
-    function buildVignette() {
-      const cx = W / 2, cy = H / 2;
-      vignetteGrad = ctx.createRadialGradient(cx, cy, Math.min(W,H)*0.2, cx, cy, Math.max(W,H)*0.75);
-      vignetteGrad.addColorStop(0, 'rgba(4,8,16,0)');
-      vignetteGrad.addColorStop(1, 'rgba(3,6,14,0.52)');
     }
 
     // ─── State ────────────────────────────────────────────────────────────────
-    let fish     = [];
-    let ripples  = [];
-    let motes    = [];
-    let sparkles = [];
-    let frame    = 0;
+    let fish    = [];
+    let ripples = [];
     let currentScale = 'pentatonic';
 
     const MAX_RIPPLES = 6;
     const MAX_SPEED   = 2.0;
     const MIN_SPEED   = 0.3;
-    const TRAIL_LEN   = 7;
 
     function fishCount() {
       return Math.min(80, Math.max(30, Math.round(W * H / 6000)));
@@ -53,14 +40,13 @@
       const angle = Math.random() * Math.PI * 2;
       const spd   = MIN_SPEED + Math.random() * 0.8;
       return {
-        x:     Math.max(12, Math.min(W - 12, cx + (Math.random() - 0.5) * spread)),
-        y:     Math.max(12, Math.min(H - 12, cy + (Math.random() - 0.5) * spread)),
-        vx:    Math.cos(angle) * spd,
-        vy:    Math.sin(angle) * spd,
+        x: Math.max(12, Math.min(W - 12, cx + (Math.random() - 0.5) * spread)),
+        y: Math.max(12, Math.min(H - 12, cy + (Math.random() - 0.5) * spread)),
+        vx: Math.cos(angle) * spd,
+        vy: Math.sin(angle) * spd,
         angle,
-        size:  6 + Math.random() * 3,
-        hue:   160 + Math.random() * 60,   // teal → aqua → blue
-        trail: [],
+        size: 6 + Math.random() * 3,
+        hue:  170 + Math.random() * 40,
         dartFrames: 0,
       };
     }
@@ -75,141 +61,104 @@
       for (const f of fish) {
         f.x = W * 0.1 + Math.random() * W * 0.8;
         f.y = H * 0.1 + Math.random() * H * 0.8;
-        const angle = Math.random() * Math.PI * 2;
-        const spd   = MIN_SPEED + Math.random() * 0.8;
-        f.vx = Math.cos(angle) * spd;
-        f.vy = Math.sin(angle) * spd;
+        const a = Math.random() * Math.PI * 2;
+        const s = MIN_SPEED + Math.random() * 0.8;
+        f.vx = Math.cos(a) * s;
+        f.vy = Math.sin(a) * s;
         f.dartFrames = 0;
-        f.trail = [];
       }
-    }
-
-    // ─── Motes (ambient drifting particles) ───────────────────────────────────
-    function initMotes() {
-      motes = Array.from({ length: 55 }, () => ({
-        x:     Math.random() * W,
-        y:     Math.random() * H,
-        r:     0.6 + Math.random() * 1.1,
-        vx:    (Math.random() - 0.5) * 0.12,
-        vy:    (Math.random() - 0.5) * 0.12,
-        phase: Math.random() * Math.PI * 2,
-        spd:   0.004 + Math.random() * 0.007,
-        hue:   185 + Math.random() * 35,
-      }));
     }
 
     // ─── Audio ────────────────────────────────────────────────────────────────
     let audioCtx = null, masterOut = null, convolver = null;
-    let lastNoteTime = 0;
+    let activeVoices = 0;
+    const MAX_VOICES = 7;   // hard cap — prevents wall of sound
+    let lastNoteTime = 0;   // per-ripple sweep throttle
 
     function initAudio() {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       audioCtx.resume();
 
-      masterOut = audioCtx.createGain();
-      masterOut.gain.value = 0.26;
-      masterOut.connect(audioCtx.destination);
+      // Warm low-pass on everything — softens stacked voices
+      const warmth = audioCtx.createBiquadFilter();
+      warmth.type = 'lowpass';
+      warmth.frequency.value = 3800;
+      warmth.Q.value = 0.5;
+      warmth.connect(audioCtx.destination);
 
-      // Lush pond reverb
+      masterOut = audioCtx.createGain();
+      masterOut.gain.value = 0.30;
+      masterOut.connect(warmth);
+
+      // Short, airy reverb — space without mud
       const sr  = audioCtx.sampleRate;
-      const len = Math.floor(sr * 4.0);
+      const len = Math.floor(sr * 1.8);
       const buf = audioCtx.createBuffer(2, len, sr);
       for (let c = 0; c < 2; c++) {
         const ch = buf.getChannelData(c);
         for (let i = 0; i < len; i++)
-          ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 1.1);
+          ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.0);
       }
       convolver = audioCtx.createConvolver();
       convolver.buffer = buf;
       const wet = audioCtx.createGain();
-      wet.gain.value = 0.62;
+      wet.gain.value = 0.38;
       convolver.connect(wet);
       wet.connect(masterOut);
-
-      // Barely-there ambient drone — just colours the reverb
-      startAmbientDrone();
     }
 
-    function startAmbientDrone() {
-      // A1 (55Hz) through reverb only — almost subliminal, adds "room"
-      [55, 82.4].forEach((freq, i) => {
-        const osc  = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        const lfo  = audioCtx.createOscillator();
-        const lg   = audioCtx.createGain();
-        osc.type = 'sine';
-        osc.frequency.value = freq;
-        lfo.frequency.value = 0.05 + i * 0.03;
-        lg.gain.value = 0.003;
-        lfo.connect(lg); lg.connect(gain.gain);
-        gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
-        gain.gain.linearRampToValueAtTime(0.010 - i * 0.003, audioCtx.currentTime + 5 + i * 2);
-        osc.connect(gain);
-        gain.connect(convolver); // wet only — stays subliminal
-        osc.start(); lfo.start();
-      });
-    }
-
-    // Warm sine + octave harmonic + gentle vibrato
-    function playNote(midi, vol = 0.10, dur = 2.0) {
-      if (!audioCtx) return;
+    // Warm tone: sine carrier + soft 3rd harmonic (adds body, not brightness)
+    // Short marimba-like decay so notes don't pile up
+    function playNote(midi, vol = 0.11, dur = 0.55) {
+      if (!audioCtx || activeVoices >= MAX_VOICES) return;
       if (audioCtx.state === 'suspended') audioCtx.resume();
       const freq = 440 * Math.pow(2, (midi - 69) / 12);
       const now  = audioCtx.currentTime;
 
+      activeVoices++;
+      setTimeout(() => activeVoices--, (dur + 0.15) * 1000);
+
       const carrier  = audioCtx.createOscillator();
-      const harmonic = audioCtx.createOscillator();
-      const harmGain = audioCtx.createGain();
-      const lfo      = audioCtx.createOscillator();
-      const lfoGain  = audioCtx.createGain();
+      const body     = audioCtx.createOscillator();  // 3rd harmonic = warmth
+      const bodyGain = audioCtx.createGain();
       const env      = audioCtx.createGain();
 
       carrier.type = 'sine';
       carrier.frequency.value = freq;
-      lfo.frequency.value = 5.0;
-      lfoGain.gain.value  = freq * 0.005;
-      lfo.connect(lfoGain); lfoGain.connect(carrier.frequency);
 
-      harmonic.type = 'sine';
-      harmonic.frequency.value = freq * 2;
-      harmGain.gain.value = 0.09;
-      harmonic.connect(harmGain); harmGain.connect(env);
+      body.type = 'sine';
+      body.frequency.value = freq * 3;   // 3rd harmonic
+      bodyGain.gain.value = 0.06;        // subtle — warms, doesn't sharpen
+      body.connect(bodyGain);
+      bodyGain.connect(env);
 
+      // Quick attack, natural decay — like a plucked string or marimba key
       env.gain.setValueAtTime(0.0001, now);
-      env.gain.linearRampToValueAtTime(vol, now + 0.07);
-      env.gain.setTargetAtTime(vol * 0.2, now + 0.07, 0.55);
+      env.gain.linearRampToValueAtTime(vol, now + 0.008);
+      env.gain.exponentialRampToValueAtTime(vol * 0.35, now + 0.08);
       env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
 
       carrier.connect(env);
       env.connect(masterOut);
       env.connect(convolver);
-      [carrier, harmonic, lfo].forEach(o => { o.start(now); o.stop(now + dur + 0.1); });
+
+      carrier.start(now); body.start(now);
+      carrier.stop(now + dur + 0.1); body.stop(now + dur + 0.1);
     }
 
-    // Ripple chord: root + fifth, brief bass plonk + sustained ring
-    function playRippleChord(y) {
+    // Ripple spawn: warm low thud + high sparkle, brief
+    function playRippleNote(y) {
       const midi = Audio.noteFromY(y, H, currentScale, 2, 52);
-      playNote(midi,     0.14, 2.4);
-      playNote(midi + 7, 0.09, 2.0);
-      // soft low plonk
-      const freq = 440 * Math.pow(2, (midi - 12 - 69) / 12);
-      const now  = audioCtx.currentTime;
-      const osc  = audioCtx.createOscillator();
-      const g    = audioCtx.createGain();
-      osc.type = 'sine'; osc.frequency.value = freq;
-      g.gain.setValueAtTime(0.0001, now);
-      g.gain.linearRampToValueAtTime(0.18, now + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
-      osc.connect(g); g.connect(masterOut); g.connect(convolver);
-      osc.start(now); osc.stop(now + 0.32);
+      playNote(midi,     0.16, 1.0);  // root, longer
+      playNote(midi + 7, 0.10, 0.7);  // fifth
     }
 
-    // Fish note: throttled so sweep sounds like a harp arpeggio
+    // Fish note: short, distinct, throttled so sweep reads as arpeggio not blur
     function playFishNote(f) {
       const now = performance.now();
-      if (now - lastNoteTime < 38) return;
+      if (now - lastNoteTime < 80) return;
       lastNoteTime = now;
-      playNote(Audio.noteFromY(f.y, H, currentScale, 2), 0.065, 1.6);
+      playNote(Audio.noteFromY(f.y, H, currentScale, 2), 0.09, 0.42);
     }
 
     // ─── Boids ────────────────────────────────────────────────────────────────
@@ -238,23 +187,19 @@
     // ─── Update ───────────────────────────────────────────────────────────────
     function updateFish() {
       for (const f of fish) {
-        f.trail.push({ x: f.x, y: f.y });
-        if (f.trail.length > TRAIL_LEN) f.trail.shift();
-
         const { fx, fy } = boidForces(f, fish);
         f.vx += fx * 0.06;
         f.vy += fy * 0.06;
         if (f.dartFrames > 0) f.dartFrames--;
 
         let spd = Math.hypot(f.vx, f.vy);
-        if (spd > MAX_SPEED)               { f.vx *= MAX_SPEED/spd; f.vy *= MAX_SPEED/spd; spd = MAX_SPEED; }
+        if (spd > MAX_SPEED)               { f.vx *= MAX_SPEED/spd; f.vy *= MAX_SPEED/spd; }
         if (spd < MIN_SPEED && spd > 0.001){ f.vx *= MIN_SPEED/spd; f.vy *= MIN_SPEED/spd; }
         if (spd < 0.001)                   { f.vx = MIN_SPEED; f.vy = 0; }
 
         f.x += f.vx;
         f.y += f.vy;
 
-        // Hard wall bounce
         const r = f.size;
         if (f.x < r)   { f.x = r;   f.vx =  Math.abs(f.vx) * 0.8; }
         if (f.x > W-r) { f.x = W-r; f.vx = -Math.abs(f.vx) * 0.8; }
@@ -262,27 +207,6 @@
         if (f.y > H-r) { f.y = H-r; f.vy = -Math.abs(f.vy) * 0.8; }
 
         f.angle = Math.atan2(f.vy, f.vx);
-      }
-    }
-
-    function updateMotes() {
-      for (const m of motes) {
-        m.x += m.vx;
-        m.y += m.vy;
-        if (m.x < -2)  m.x = W + 2;
-        if (m.x > W+2) m.x = -2;
-        if (m.y < -2)  m.y = H + 2;
-        if (m.y > H+2) m.y = -2;
-      }
-    }
-
-    function updateSparkles() {
-      for (let i = sparkles.length - 1; i >= 0; i--) {
-        const s = sparkles[i];
-        s.x += s.vx; s.y += s.vy;
-        s.vx *= 0.88; s.vy *= 0.88;
-        s.life -= 0.045;
-        if (s.life <= 0) sparkles.splice(i, 1);
       }
     }
 
@@ -310,139 +234,65 @@
     }
 
     // ─── Draw ─────────────────────────────────────────────────────────────────
-    function drawMotes() {
-      for (const m of motes) {
-        const alpha = 0.055 + 0.038 * Math.sin(frame * m.spd + m.phase);
-        ctx.beginPath();
-        ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
-        ctx.fillStyle = `hsla(${m.hue}, 65%, 82%, ${alpha})`;
-        ctx.fill();
-      }
-    }
-
     function drawFish(f) {
-      // Comet tail (world space, before local transform)
-      for (let i = 0; i < f.trail.length; i++) {
-        const frac = (i + 1) / f.trail.length;
-        ctx.beginPath();
-        ctx.arc(f.trail[i].x, f.trail[i].y, f.size * 0.3 * frac, 0, Math.PI * 2);
-        ctx.fillStyle = `hsla(${f.hue}, 65%, 72%, ${frac * 0.22})`;
-        ctx.fill();
-      }
-
       ctx.save();
       ctx.translate(f.x, f.y);
       ctx.rotate(f.angle);
 
-      // Soft gradient glow aura
-      const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, f.size * 2.8);
-      const lit  = f.dartFrames > 0;
-      glow.addColorStop(0, `hsla(${f.hue}, 75%, 75%, ${lit ? 0.28 : 0.18})`);
-      glow.addColorStop(1, `hsla(${f.hue}, 75%, 75%, 0)`);
+      // Cheap glow
       ctx.beginPath();
-      ctx.arc(0, 0, f.size * 2.8, 0, Math.PI * 2);
-      ctx.fillStyle = glow;
+      ctx.arc(0, 0, f.size * 2, 0, Math.PI * 2);
+      ctx.fillStyle = `hsla(${f.hue}, 50%, 60%, 0.12)`;
       ctx.fill();
 
       // Body
-      const lightness = lit ? 76 : 58;
-      const saturation = lit ? 70 : 52;
+      const lit = f.dartFrames > 0 ? 75 : 55;
       ctx.beginPath();
-      ctx.ellipse(0, 0, f.size, f.size * 0.42, 0, 0, Math.PI * 2);
-      ctx.fillStyle = `hsl(${f.hue}, ${saturation}%, ${lightness}%)`;
-      ctx.fill();
-
-      // Sheen highlight — small bright ellipse offset up-left
-      ctx.beginPath();
-      ctx.ellipse(f.size * 0.12, -f.size * 0.13, f.size * 0.35, f.size * 0.14, -0.35, 0, Math.PI * 2);
-      ctx.fillStyle = `hsla(${f.hue}, 80%, 94%, 0.30)`;
+      ctx.ellipse(0, 0, f.size, f.size * 0.45, 0, 0, Math.PI * 2);
+      ctx.fillStyle = `hsl(${f.hue}, 50%, ${lit}%)`;
       ctx.fill();
 
       // Forked tail
       ctx.beginPath();
-      ctx.moveTo(-f.size * 0.85, 0);
-      ctx.lineTo(-f.size * 1.82, -f.size * 0.62);
-      ctx.lineTo(-f.size * 1.82,  f.size * 0.62);
+      ctx.moveTo(-f.size * 0.9, 0);
+      ctx.lineTo(-f.size * 1.7, -f.size * 0.55);
+      ctx.lineTo(-f.size * 1.7,  f.size * 0.55);
       ctx.closePath();
-      ctx.fillStyle = `hsl(${f.hue}, 46%, ${lightness - 12}%)`;
+      ctx.fillStyle = `hsl(${f.hue}, 45%, ${lit - 8}%)`;
       ctx.fill();
 
       ctx.restore();
     }
 
     function drawRipple(rpl) {
-      // Hue shifts from cool blue (top) to warm cyan (bottom)
-      const hue = 195 + (rpl.y / H) * 20;
       ctx.save();
       for (let k = -1; k <= 1; k++) {
-        const r = rpl.r + k * 7;
+        const r = rpl.r + k * 6;
         if (r <= 0) continue;
-        const alpha = rpl.opacity * (0.62 - Math.abs(k) * 0.20);
         ctx.beginPath();
         ctx.arc(rpl.x, rpl.y, r, 0, Math.PI * 2);
-        ctx.strokeStyle = `hsla(${hue}, 75%, 78%, ${alpha})`;
-        ctx.lineWidth = k === 0 ? 1.6 : 0.9;
+        ctx.strokeStyle = `rgba(160, 210, 230, ${rpl.opacity * (0.65 - Math.abs(k) * 0.22)})`;
+        ctx.lineWidth = 1.4;
         ctx.stroke();
       }
       ctx.restore();
     }
 
-    function drawSparkles() {
-      for (const s of sparkles) {
-        const r = s.life * 3.5;
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
-        ctx.fillStyle = `hsla(${s.hue}, 85%, 88%, ${s.life * 0.85})`;
-        ctx.fill();
-      }
-    }
-
     function draw() {
-      // Motion blur
-      ctx.fillStyle = 'rgba(8, 12, 20, 0.22)';
+      ctx.fillStyle = 'rgba(8, 12, 20, 0.25)';
       ctx.fillRect(0, 0, W, H);
-
-      drawMotes();
-
       for (const rpl of ripples) drawRipple(rpl);
-      drawSparkles();
-      for (const f of fish) drawFish(f);
-
-      // Vignette darkens edges — drawn last so it's always crisp
-      ctx.fillStyle = vignetteGrad;
-      ctx.fillRect(0, 0, W, H);
+      for (const f of fish)      drawFish(f);
     }
 
-    function loop() {
-      frame++;
-      updateFish();
-      updateMotes();
-      updateSparkles();
-      updateRipples();
-      draw();
-      requestAnimationFrame(loop);
-    }
+    function loop() { updateFish(); updateRipples(); draw(); requestAnimationFrame(loop); }
 
     // ─── Input ────────────────────────────────────────────────────────────────
     function spawnRipple(x, y) {
       if (ripples.length >= MAX_RIPPLES) ripples.shift();
       const maxR = Math.max(W, H) * 0.7;
       ripples.push({ x, y, r: 0, maxR, speed: 2.5, opacity: 1.0, triggered: new Set() });
-
-      // Impact sparkle burst
-      const hue = 195 + (y / H) * 20;
-      for (let i = 0; i < 10; i++) {
-        const a = (i / 10) * Math.PI * 2;
-        sparkles.push({
-          x, y,
-          vx: Math.cos(a) * (1.5 + Math.random() * 2),
-          vy: Math.sin(a) * (1.5 + Math.random() * 2),
-          life: 0.7 + Math.random() * 0.3,
-          hue: hue + (Math.random() - 0.5) * 15,
-        });
-      }
-
-      playRippleChord(y);
+      playRippleNote(y);
     }
 
     function canvasPos(e) {
@@ -477,11 +327,9 @@
       if (!W || !H) return;
       const rect = canvas.getBoundingClientRect();
       const ox = rect.width / W, oy = rect.height / H;
-      setupCanvas(); // also rebuilds vignette
-      for (const f   of fish)    { f.x   *= ox; f.y   *= oy; f.trail = []; }
+      setupCanvas();
+      for (const f   of fish)    { f.x   *= ox; f.y   *= oy; }
       for (const rpl of ripples) { rpl.x *= ox; rpl.y *= oy; }
-      // Rescatter motes across new dimensions
-      for (const m of motes)     { m.x   *= ox; m.y   *= oy; }
     }
 
     const beginEl = document.getElementById('begin');
@@ -501,7 +349,6 @@
 
       setupCanvas();
       initFish();
-      initMotes();
       setupInput();
       setupKeyboard();
       window.addEventListener('resize', onResize);
