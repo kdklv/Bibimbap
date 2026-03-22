@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>tracy</title>
+  <link rel="stylesheet" href="../shared/theme.css">
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div class="begin-screen" id="begin">touch to begin</div>
+  <script src="../shared/audio.js"></script>
+  <script>
+    const canvas = document.getElementById('canvas');
+    let ctx, W, H;
+
+    function setupCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      W = rect.width; H = rect.height;
+      canvas.width = W * dpr; canvas.height = H * dpr;
+      ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+    }
+
+    let creatures = [], drawing = null, isDrawing = false, frame = 0;
+    const HUES  = [200, 272, 344, 56, 128];
+    const SPEED = 0.40;
+    const MAX   = 4;
+    let currentScale = 'pentatonic';
+
+    // ─── Audio ────────────────────────────────────────────────────────────────
+    let audioCtx = null, masterOut = null, convolver = null;
+
+    function initAudio() {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      audioCtx.resume();
+      masterOut = audioCtx.createGain();
+      masterOut.gain.value = 0.45;
+      masterOut.connect(audioCtx.destination);
+      const sr = audioCtx.sampleRate, len = Math.floor(sr * 3.5);
+      const buf = audioCtx.createBuffer(2, len, sr);
+      for (let c = 0; c < 2; c++) {
+        const ch = buf.getChannelData(c);
+        for (let i = 0; i < len; i++)
+          ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 1.4);
+      }
+      convolver = audioCtx.createConvolver();
+      convolver.buffer = buf;
+      const wet = audioCtx.createGain();
+      wet.gain.value = 0.44;
+      convolver.connect(wet); wet.connect(masterOut);
+    }
+
+    function playNote(midi, vol, dur = 2.6) {
+      if (!audioCtx) return;
+      const freq = 440 * Math.pow(2, (midi - 69) / 12);
+      const now  = audioCtx.currentTime;
+      const osc1 = audioCtx.createOscillator();
+      const osc2 = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      const g2   = audioCtx.createGain();
+      const lfo  = audioCtx.createOscillator();
+      const lg   = audioCtx.createGain();
+      lfo.frequency.value = 4.5; lg.gain.value = freq * 0.006;
+      lfo.connect(lg); lg.connect(osc1.frequency);
+      osc1.type = 'sine'; osc1.frequency.value = freq;
+      osc2.type = 'sine'; osc2.frequency.value = freq * 1.5; g2.gain.value = 0.12;
+      osc1.connect(gain); osc2.connect(g2); g2.connect(gain);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.linearRampToValueAtTime(vol, now + 0.10);
+      gain.gain.setTargetAtTime(vol * 0.2, now + 0.10, 0.55);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+      gain.connect(masterOut); gain.connect(convolver);
+      [osc1, osc2, lfo].forEach(o => { o.start(now); o.stop(now + dur + 0.1); });
+    }
+
+    // ─── Path ─────────────────────────────────────────────────────────────────
+    function pathLength(pts) {
+      let l = 0;
+      for (let i = 1; i < pts.length; i++)
+        l += Math.hypot(pts[i].x - pts[i-1].x, pts[i].y - pts[i-1].y);
+      return l;
+    }
+
+    function chaikinClosed(pts) {
+      const out = [], n = pts.length;
+      for (let i = 0; i < n; i++) {
+        const a = pts[i], b = pts[(i+1)%n];
+        out.push({ x: a.x*.75+b.x*.25, y: a.y*.75+b.y*.25 });
+        out.push({ x: a.x*.25+b.x*.75, y: a.y*.25+b.y*.75 });
+      }
+      return out;
+    }
+
+    function resample(pts, spacing) {
+      if (pts.length < 2) return pts;
+      const out = [{ ...pts[0] }]; let carry = 0;
+      for (let i = 1; i < pts.length; i++) {
+        const dx = pts[i].x-pts[i-1].x, dy = pts[i].y-pts[i-1].y;
+        const seg = Math.hypot(dx, dy); if (!seg) continue;
+        let d = spacing - carry;
+        while (d <= seg) {
+          out.push({ x: pts[i-1].x+dx*d/seg, y: pts[i-1].y+dy*d/seg });
+          d += spacing;
+        }
+        carry = seg - (d - spacing);
+      }
+      return out;
+    }
+
+    function finalizePath(raw) {
+      if (pathLength(raw) < 80) return;
+      let pts = chaikinClosed(chaikinClosed(chaikinClosed(chaikinClosed(raw))));
+      pts = resample(pts, 8);
+      if (pts.length < 4) return;
+      spawnCreature(pts);
+    }
+
+    // ─── Creature ─────────────────────────────────────────────────────────────
+    function spawnCreature(path) {
+      if (creatures.length >= MAX) creatures[0].dying = true;
+      const n         = path.length;
+      const noteEvery = Math.max(50, Math.round(n / (SPEED * 14)));
+      const hue       = HUES[creatures.length % HUES.length];
+      // Three fish: lead + two at ~1/3 intervals
+      // Each fish gets its own hue offset so the school shimmers
+      const school = [
+        { off: 0,    sz: 1.00, wph: Math.random() * Math.PI * 2, dh: 0,   sx: 0, sy: 0 },
+        { off: 0.36, sz: 0.74, wph: Math.random() * Math.PI * 2, dh: 22,  sx: 0, sy: 0 },
+        { off: 0.66, sz: 0.66, wph: Math.random() * Math.PI * 2, dh: -18, sx: 0, sy: 0 },
+      ];
+      // Spawn burst: ring of dots that expand outward
+      const burst = [];
+      const bx = path[0].x, by = path[0].y;
+      for (let i = 0; i < 14; i++) {
+        const a = (i / 14) * Math.PI * 2;
+        burst.push({ a, r: 4, life: 1.0 });
+      }
+      creatures.push({
+        path, n,
+        phases:    path.map(() => Math.random() * Math.PI * 2),
+        t:         0,
+        school,
+        scared:    0,
+        scareX:    0, scareY: 0,   // tap position for scatter direction
+        hue,
+        opacity:   0,
+        dying:     false,
+        noteTimer: Math.floor(noteEvery * Math.random()),
+        noteEvery,
+        burst, bx, by,
+        burstLife: 1.0,
+      });
+      // Spawn chord
+      const midi = Audio.noteFromY(path[0].y, H, currentScale, 2);
+      playNote(midi, 0.09, 1.8);
+      playNote(midi + 7, 0.06, 1.4);
+    }
+
+    // ─── Update ───────────────────────────────────────────────────────────────
+    function updateCreatures() {
+      for (let i = creatures.length - 1; i >= 0; i--) {
+        const c = creatures[i];
+        if (c.dying) {
+          c.opacity -= 0.0033;
+          if (c.opacity <= 0) { creatures.splice(i, 1); continue; }
+        } else {
+          c.opacity = Math.min(1, c.opacity + 0.016);
+        }
+
+        // Burst ring expands on spawn
+        if (c.burstLife > 0) c.burstLife -= 0.032;
+
+        if (c.scared > 0) c.scared--;
+        const spd = c.scared > 0 ? SPEED * 2.4 : SPEED;
+        c.t = (c.t + spd) % c.n;
+
+        for (const f of c.school) {
+          f.wph += 0.26;
+          // Scatter: fish drift perpendicular off path when scared
+          if (c.scared > 60) {
+            // Amplify scatter at start of scare
+            const amp = (c.scared - 60) / 20;
+            f.sx += (Math.random() - 0.5) * amp * 3;
+            f.sy += (Math.random() - 0.5) * amp * 3;
+          } else {
+            // Slowly return to path
+            f.sx *= 0.85;
+            f.sy *= 0.85;
+          }
+        }
+
+        if (--c.noteTimer <= 0) {
+          c.noteTimer = c.noteEvery;
+          const head = c.school[0];
+          const idx  = Math.floor((c.t + head.off * c.n) % c.n);
+          const pos  = c.path[idx];
+          const vol  = 0.11 / Math.sqrt(creatures.length);
+          playNote(Audio.noteFromY(pos.y, H, currentScale, 2), vol);
+        }
+      }
+    }
+
+    // ─── Draw ─────────────────────────────────────────────────────────────────
+    function ripplePoints(path, phases) {
+      const n = path.length;
+      const amp = 3.2;
+      return path.map((p, i) => {
+        const prev = path[(i-1+n)%n], next = path[(i+1)%n];
+        const tx = next.x-prev.x, ty = next.y-prev.y;
+        const tl = Math.hypot(tx, ty) || 1;
+        const nx = -ty/tl, ny = tx/tl;
+        const d = amp * Math.sin(frame*0.004 + phases[i])
+                + amp * 0.4 * Math.sin(frame*0.011 + phases[i]*1.7);
+        return { x: p.x+nx*d, y: p.y+ny*d };
+      });
+    }
+
+    function traceClosed(pts) {
+      const n = pts.length;
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) {
+        const p0=pts[(i-1+n)%n], p1=pts[i], p2=pts[(i+1)%n], p3=pts[(i+2)%n];
+        if (i===0) ctx.moveTo(p1.x, p1.y);
+        ctx.bezierCurveTo(
+          p1.x+(p2.x-p0.x)/6, p1.y+(p2.y-p0.y)/6,
+          p2.x-(p3.x-p1.x)/6, p2.y-(p3.y-p1.y)/6,
+          p2.x, p2.y);
+      }
+      ctx.closePath();
+    }
+
+    function headingAt(path, t) {
+      const n = path.length, i = Math.floor(t) % n;
+      return Math.atan2(path[(i+1)%n].y - path[(i-1+n)%n].y,
+                        path[(i+1)%n].x - path[(i-1+n)%n].x);
+    }
+
+    function drawOneFish(rp, rawPath, t, hue, opacity, f, scared) {
+      const { sz, wph, dh, sx, sy } = f;
+      const n   = rp.length;
+      const idx = Math.floor(t) % n;
+      const pos = rp[idx];
+      const ang = headingAt(rawPath, t);
+      const h   = (hue + dh + 360) % 360;
+      // Breathing — subtle size pulse
+      const breath = 1 + 0.07 * Math.sin(wph * 0.18);
+      const s = sz * breath;
+
+      // Comet tail — 20 fading dots
+      const TAIL = 20;
+      ctx.save();
+      ctx.shadowBlur  = 8;
+      ctx.shadowColor = `hsl(${h}, 90%, 70%)`;
+      for (let k = TAIL; k >= 1; k--) {
+        const ti  = ((idx - k * 2) % n + n) % n;
+        const tp  = rp[ti];
+        const frac = k / TAIL;
+        ctx.globalAlpha = opacity * frac * 0.55;
+        ctx.fillStyle   = `hsl(${h}, 85%, 70%)`;
+        ctx.beginPath();
+        ctx.arc(tp.x + sx * frac, tp.y + sy * frac, s * frac * 2.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // Fish body + forked tail
+      const px = pos.x + sx, py = pos.y + sy;
+      ctx.save();
+      ctx.globalAlpha = opacity;
+      ctx.translate(px, py);
+      ctx.rotate(ang + Math.sin(wph) * (scared > 0 ? 0.42 : 0.14));
+      ctx.scale(s, s);
+      ctx.shadowBlur  = 22;
+      ctx.shadowColor = `hsl(${h}, 95%, 75%)`;
+      ctx.fillStyle   = `hsl(${h}, 80%, 78%)`;
+      ctx.beginPath(); ctx.ellipse(0, 0, 9, 4, 0, 0, Math.PI * 2); ctx.fill();
+      // Sheen stripe
+      ctx.shadowBlur = 0;
+      ctx.fillStyle  = `hsla(${h}, 90%, 95%, 0.35)`;
+      ctx.beginPath(); ctx.ellipse(1, -1, 4, 1.4, -0.3, 0, Math.PI * 2); ctx.fill();
+      // Forked tail
+      ctx.strokeStyle = `hsl(${h}, 75%, 68%)`;
+      ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-7, 0); ctx.lineTo(-15, -6);
+      ctx.moveTo(-7, 0); ctx.lineTo(-15,  6);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawCreature(c) {
+      const rp = ripplePoints(c.path, c.phases);
+      const scared = c.scared;
+
+      // Path glow — two layers for richness
+      ctx.save();
+      ctx.globalAlpha = c.opacity * (scared > 0 ? 0.7 : 0.42);
+      ctx.strokeStyle = `hsl(${c.hue}, 70%, 60%)`;
+      ctx.lineWidth   = 2.5;
+      ctx.shadowBlur  = scared > 0 ? 22 : 12;
+      ctx.shadowColor = `hsl(${c.hue}, 85%, 65%)`;
+      traceClosed(rp);
+      ctx.stroke();
+      ctx.restore();
+
+      // Spawn burst ring
+      if (c.burstLife > 0) {
+        const life = c.burstLife;
+        ctx.save();
+        for (const b of c.burst) {
+          const r = 4 + (1 - life) * 55;
+          const bx2 = c.bx + Math.cos(b.a) * r;
+          const by2 = c.by + Math.sin(b.a) * r;
+          ctx.globalAlpha = life * life * 0.9;
+          ctx.fillStyle   = `hsl(${c.hue}, 90%, 80%)`;
+          ctx.shadowBlur  = 10;
+          ctx.shadowColor = `hsl(${c.hue}, 90%, 80%)`;
+          ctx.beginPath();
+          ctx.arc(bx2, by2, life * 3.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      // School of fish
+      for (const f of c.school) {
+        const ft = (c.t + f.off * c.n) % c.n;
+        drawOneFish(rp, c.path, ft, c.hue, c.opacity, f, scared);
+      }
+    }
+
+    function draw() {
+      frame++;
+      ctx.clearRect(0, 0, W, H);
+
+      for (const c of creatures) drawCreature(c);
+
+      // In-progress stroke
+      if (isDrawing && drawing && drawing.pts.length > 1) {
+        ctx.save();
+        ctx.setLineDash([4, 8]);
+        ctx.strokeStyle = 'rgba(232,234,240,0.35)';
+        ctx.lineWidth = 1.4; ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(drawing.pts[0].x, drawing.pts[0].y);
+        for (let i = 1; i < drawing.pts.length; i++)
+          ctx.lineTo(drawing.pts[i].x, drawing.pts[i].y);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    function loop() { updateCreatures(); draw(); requestAnimationFrame(loop); }
+
+    // ─── Input ────────────────────────────────────────────────────────────────
+    let drawingPtrId = null, ptrDownPos = {x:0,y:0}, downTime = 0;
+    let lastTapTime = 0, lastTapPos = {x:0,y:0}, drawDist = 0;
+
+    function canvasPos(e) {
+      const r = canvas.getBoundingClientRect();
+      return { x: e.clientX-r.left, y: e.clientY-r.top };
+    }
+
+    function scareAll(p) {
+      for (const c of creatures) {
+        c.scared = 80;
+        c.scareX = p.x; c.scareY = p.y;
+        // Kick scatter direction away from tap
+        for (const f of c.school) {
+          const n   = c.path.length;
+          const idx = Math.floor(c.t + f.off * n) % n;
+          const fp  = c.path[idx];
+          const dx  = fp.x - p.x, dy = fp.y - p.y;
+          const d   = Math.hypot(dx, dy) || 1;
+          f.sx = (dx / d) * 12;
+          f.sy = (dy / d) * 12;
+        }
+      }
+      playNote(Audio.noteFromY(p.y, H, currentScale, 2), 0.12, 0.5);
+    }
+
+    function onDown(e) {
+      e.preventDefault();
+      canvas.setPointerCapture(e.pointerId);
+      const p = canvasPos(e);
+      ptrDownPos = { ...p }; downTime = performance.now();
+      if (drawingPtrId !== null) return;
+      drawingPtrId = e.pointerId; isDrawing = true;
+      drawing = { pts: [p] }; drawDist = 0;
+      playNote(Audio.noteFromY(p.y, H, currentScale, 2), 0.07, 1.0);
+    }
+
+    function onMove(e) {
+      if (!isDrawing || e.pointerId !== drawingPtrId) return;
+      const p = canvasPos(e), last = drawing.pts.at(-1);
+      const d = Math.hypot(p.x-last.x, p.y-last.y);
+      if (d >= 3) {
+        drawing.pts.push(p); drawDist += d;
+        if (drawDist >= 38) {
+          drawDist -= 38;
+          playNote(Audio.noteFromY(p.y, H, currentScale, 2), 0.065, 0.9);
+        }
+      }
+    }
+
+    function onUp(e) {
+      const p = canvasPos(e);
+      if (e.pointerId === drawingPtrId) {
+        isDrawing = false; drawingPtrId = null;
+        const held  = performance.now() - downTime;
+        const moved = Math.hypot(p.x-ptrDownPos.x, p.y-ptrDownPos.y);
+        if (held < 220 && moved < 18 && creatures.length > 0) {
+          scareAll(p);
+        } else if (drawing) {
+          finalizePath(drawing.pts);
+        }
+        drawing = null;
+      }
+      // Double-tap clears all
+      const moved = Math.hypot(p.x-ptrDownPos.x, p.y-ptrDownPos.y);
+      if (moved < 12) {
+        const now = performance.now();
+        if (now-lastTapTime < 350 && Math.hypot(p.x-lastTapPos.x, p.y-lastTapPos.y) < 44) {
+          for (const c of creatures) c.dying = true;
+          lastTapTime = 0;
+        } else { lastTapTime = now; lastTapPos = {...p}; }
+      }
+    }
+
+    function setupInput() {
+      canvas.addEventListener('pointerdown',   onDown);
+      canvas.addEventListener('pointermove',   onMove);
+      canvas.addEventListener('pointerup',     onUp);
+      canvas.addEventListener('pointercancel', onUp);
+    }
+
+    function setupKeyboard() {
+      document.addEventListener('keydown', e => {
+        switch (e.code) {
+          case 'KeyC':   for (const c of creatures) c.dying = true; break;
+          case 'Digit1': currentScale = 'gamelan';    break;
+          case 'Digit2': currentScale = 'pentatonic'; break;
+          case 'Digit3': currentScale = 'wholeTone';  break;
+          case 'Digit4': currentScale = 'major';      break;
+          case 'Digit5': currentScale = 'minor';      break;
+        }
+      });
+    }
+
+    function onResize() {
+      if (!W || !H) return;
+      const sx = canvas.getBoundingClientRect().width/W;
+      const sy = canvas.getBoundingClientRect().height/H;
+      setupCanvas();
+      for (const c of creatures) for (const p of c.path) { p.x*=sx; p.y*=sy; }
+    }
+
+    const beginEl = document.getElementById('begin');
+    function begin() {
+      initAudio();
+      beginEl.style.opacity = '0'; beginEl.style.pointerEvents = 'none';
+      setTimeout(() => beginEl.remove(), 700);
+      setupCanvas(); setupInput(); setupKeyboard();
+      window.addEventListener('resize', onResize);
+      requestAnimationFrame(loop);
+    }
+    document.addEventListener('pointerdown', begin, { once: true });
+  </script>
+</body>
+</html>
