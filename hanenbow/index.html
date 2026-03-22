@@ -234,9 +234,9 @@
     let convolver = null;
     let masterOut = null;
 
-    async function initAudio() {
+    function initAudio() {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      await audioCtx.resume();   // must await — iOS starts context in 'suspended'
+      audioCtx.resume();   // fire-and-forget within gesture — satisfies iOS policy
 
       masterOut = audioCtx.createGain();
       masterOut.gain.value = 0.68;
@@ -261,7 +261,7 @@
 
     function playNote(midi, attack, decay, vol) {
       if (!audioCtx) return;
-      if (audioCtx.state === 'suspended') { audioCtx.resume(); return; }
+      if (audioCtx.state === 'suspended') audioCtx.resume();
       const freq = 440 * Math.pow(2, (midi - 69) / 12);
       const osc  = audioCtx.createOscillator();
       const gain = audioCtx.createGain();
@@ -656,8 +656,8 @@
 
     const beginEl = document.getElementById('begin');
 
-    async function begin() {
-      await initAudio();
+    function begin() {
+      initAudio();
 
       // Re-resume after iOS background suspension
       document.addEventListener('visibilitychange', () => {

@@ -32,9 +32,9 @@
     // ─── Audio ────────────────────────────────────────────────────────────────
     let audioCtx = null, masterOut = null, convolver = null;
 
-    async function initAudio() {
+    function initAudio() {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      await audioCtx.resume();
+      audioCtx.resume();
       masterOut = audioCtx.createGain();
       masterOut.gain.value = 0.45;
       masterOut.connect(audioCtx.destination);
@@ -54,7 +54,7 @@
 
     function playNote(midi, vol, dur = 2.6) {
       if (!audioCtx) return;
-      if (audioCtx.state === 'suspended') { audioCtx.resume(); return; }
+      if (audioCtx.state === 'suspended') audioCtx.resume();
       const freq = 440 * Math.pow(2, (midi - 69) / 12);
       const now  = audioCtx.currentTime;
       const osc1 = audioCtx.createOscillator();
@@ -459,8 +459,8 @@
     }
 
     const beginEl = document.getElementById('begin');
-    async function begin() {
-      await initAudio();
+    function begin() {
+      initAudio();
 
       // Re-resume after iOS background suspension
       document.addEventListener('visibilitychange', () => {
