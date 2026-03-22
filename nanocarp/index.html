@@ -28,9 +28,28 @@
     let ripples = [];
     let currentScale = 'pentatonic';
 
-    const MAX_RIPPLES = 6;
-    const MAX_SPEED   = 2.0;
-    const MIN_SPEED   = 0.3;
+    const MAX_RIPPLES  = 6;
+    const MAX_SPEED    = 2.0;
+    const MIN_SPEED    = 0.3;
+    const BOID_CELL    = 105;  // slightly > max interaction radius (100px)
+
+    // Pre-allocated spatial grid — cleared and refilled each frame, no per-frame allocation
+    let boidGrid = [], boidGridCols = 0, boidGridRows = 0;
+
+    function initBoidGrid() {
+      boidGridCols = Math.ceil(W / BOID_CELL) + 2;
+      boidGridRows = Math.ceil(H / BOID_CELL) + 2;
+      boidGrid = Array.from({ length: boidGridCols * boidGridRows }, () => []);
+    }
+
+    function buildBoidGrid() {
+      for (const cell of boidGrid) cell.length = 0;
+      for (const f of fish) {
+        const gx = Math.min(boidGridCols - 1, Math.max(0, Math.floor(f.x / BOID_CELL)));
+        const gy = Math.min(boidGridRows - 1, Math.max(0, Math.floor(f.y / BOID_CELL)));
+        boidGrid[gx * boidGridRows + gy].push(f);
+      }
+    }
 
     function fishCount() {
       return Math.min(80, Math.max(30, Math.round(W * H / 6000)));
@@ -45,8 +64,10 @@
         vx: Math.cos(angle) * spd,
         vy: Math.sin(angle) * spd,
         angle,
-        size: 6 + Math.random() * 3,
+        size: 6 + Math.random() * 3,   // maps to Tracy's sz via size/9
         hue:  170 + Math.random() * 40,
+        wph:  Math.random() * Math.PI * 2,  // wag phase — body wiggle
+        trail: [],
         dartFrames: 0,
       };
     }
@@ -66,6 +87,7 @@
         f.vx = Math.cos(a) * s;
         f.vy = Math.sin(a) * s;
         f.dartFrames = 0;
+        f.trail = [];
       }
     }
 
@@ -162,15 +184,24 @@
     }
 
     // ─── Boids ────────────────────────────────────────────────────────────────
-    function boidForces(f, all) {
+    // Spatial grid reduces O(n²) to O(n × k) where k ≈ fish in 3×3 cells
+    function boidForces(f) {
       let sx=0, sy=0, ax=0, ay=0, cx=0, cy=0, sn=0, an=0, cn=0;
-      for (const o of all) {
-        if (o === f) continue;
-        const dx = o.x - f.x, dy = o.y - f.y;
-        const d  = Math.hypot(dx, dy);
-        if (d < 30)  { sx -= dx/d; sy -= dy/d; sn++; }
-        if (d < 80)  { ax += o.vx; ay += o.vy; an++; }
-        if (d < 100) { cx += o.x;  cy += o.y;  cn++; }
+      const gx0 = Math.max(0, Math.floor(f.x / BOID_CELL) - 1);
+      const gy0 = Math.max(0, Math.floor(f.y / BOID_CELL) - 1);
+      const gx1 = Math.min(boidGridCols - 1, gx0 + 2);
+      const gy1 = Math.min(boidGridRows - 1, gy0 + 2);
+      for (let gx = gx0; gx <= gx1; gx++) {
+        for (let gy = gy0; gy <= gy1; gy++) {
+          for (const o of boidGrid[gx * boidGridRows + gy]) {
+            if (o === f) continue;
+            const dx = o.x - f.x, dy = o.y - f.y;
+            const d  = Math.hypot(dx, dy);
+            if (d < 30)  { sx -= dx/d; sy -= dy/d; sn++; }
+            if (d < 80)  { ax += o.vx; ay += o.vy; an++; }
+            if (d < 100) { cx += o.x;  cy += o.y;  cn++; }
+          }
+        }
       }
       let fx = 0, fy = 0;
       if (sn) { fx += (sx/sn) * 1.5;           fy += (sy/sn) * 1.5; }
@@ -186,8 +217,9 @@
 
     // ─── Update ───────────────────────────────────────────────────────────────
     function updateFish() {
+      buildBoidGrid();
       for (const f of fish) {
-        const { fx, fy } = boidForces(f, fish);
+        const { fx, fy } = boidForces(f);
         f.vx += fx * 0.06;
         f.vy += fy * 0.06;
         if (f.dartFrames > 0) f.dartFrames--;
@@ -199,6 +231,9 @@
 
         f.x += f.vx;
         f.y += f.vy;
+        f.wph += 0.26;
+        f.trail.push({ x: f.x, y: f.y });
+        if (f.trail.length > 14) f.trail.shift();
 
         const r = f.size;
         if (f.x < r)   { f.x = r;   f.vx =  Math.abs(f.vx) * 0.8; }
@@ -234,33 +269,45 @@
     }
 
     // ─── Draw ─────────────────────────────────────────────────────────────────
+    // Adapted from Tracy's drawOneFish — same wag, breath, comet tail, sheen, forked tail
     function drawFish(f) {
+      const h      = f.hue;
+      const scared = f.dartFrames > 0;
+      const sz     = f.size / 9;                          // Tracy uses sz≈1.0 with 9px ellipse
+      const breath = 1 + 0.07 * Math.sin(f.wph * 0.18);  // subtle size pulse
+      const s      = sz * breath;
+
+      // Comet tail — world-space dots fading back through trail
+      // Skip shadowBlur here (up to 80 fish × 14 dots = ~1000 ops); glow on body only
+      const TRAIL = f.trail.length;
+      for (let k = 0; k < TRAIL; k++) {
+        const frac = (k + 1) / TRAIL;
+        ctx.globalAlpha = frac * 0.52;
+        ctx.fillStyle   = `hsl(${h}, 85%, 70%)`;
+        ctx.beginPath();
+        ctx.arc(f.trail[k].x, f.trail[k].y, s * frac * 2.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
+      // Body — same as Tracy: scaled local space, shadowBlur glow, sheen, forked tail
       ctx.save();
       ctx.translate(f.x, f.y);
-      ctx.rotate(f.angle);
-
-      // Cheap glow
+      ctx.rotate(f.angle + Math.sin(f.wph) * (scared ? 0.42 : 0.14));
+      ctx.scale(s, s);
+      ctx.shadowBlur  = 10;
+      ctx.shadowColor = `hsl(${h}, 95%, 75%)`;
+      ctx.fillStyle   = `hsl(${h}, 80%, 78%)`;
+      ctx.beginPath(); ctx.ellipse(0, 0, 9, 4, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle  = `hsla(${h}, 90%, 95%, 0.35)`;
+      ctx.beginPath(); ctx.ellipse(1, -1, 4, 1.4, -0.3, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = `hsl(${h}, 75%, 68%)`;
+      ctx.lineWidth = 2.2; ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.arc(0, 0, f.size * 2, 0, Math.PI * 2);
-      ctx.fillStyle = `hsla(${f.hue}, 50%, 60%, 0.12)`;
-      ctx.fill();
-
-      // Body
-      const lit = f.dartFrames > 0 ? 75 : 55;
-      ctx.beginPath();
-      ctx.ellipse(0, 0, f.size, f.size * 0.45, 0, 0, Math.PI * 2);
-      ctx.fillStyle = `hsl(${f.hue}, 50%, ${lit}%)`;
-      ctx.fill();
-
-      // Forked tail
-      ctx.beginPath();
-      ctx.moveTo(-f.size * 0.9, 0);
-      ctx.lineTo(-f.size * 1.7, -f.size * 0.55);
-      ctx.lineTo(-f.size * 1.7,  f.size * 0.55);
-      ctx.closePath();
-      ctx.fillStyle = `hsl(${f.hue}, 45%, ${lit - 8}%)`;
-      ctx.fill();
-
+      ctx.moveTo(-7, 0); ctx.lineTo(-15, -6);
+      ctx.moveTo(-7, 0); ctx.lineTo(-15,  6);
+      ctx.stroke();
       ctx.restore();
     }
 
@@ -328,6 +375,7 @@
       const rect = canvas.getBoundingClientRect();
       const ox = rect.width / W, oy = rect.height / H;
       setupCanvas();
+      initBoidGrid();
       for (const f   of fish)    { f.x   *= ox; f.y   *= oy; }
       for (const rpl of ripples) { rpl.x *= ox; rpl.y *= oy; }
     }
@@ -349,6 +397,7 @@
 
       setupCanvas();
       initFish();
+      initBoidGrid();
       setupInput();
       setupKeyboard();
       window.addEventListener('resize', onResize);

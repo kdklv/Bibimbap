@@ -249,14 +249,11 @@
       const breath = 1 + 0.07 * Math.sin(wph * 0.18);
       const s = sz * breath;
 
-      // Comet tail — 20 fading dots
+      // Comet tail — 20 fading dots, no shadowBlur (3 fish × 20 dots × 4 creatures = 240 blur ops)
       const TAIL = 20;
-      ctx.save();
-      ctx.shadowBlur  = 8;
-      ctx.shadowColor = `hsl(${h}, 90%, 70%)`;
       for (let k = TAIL; k >= 1; k--) {
-        const ti  = ((idx - k * 2) % n + n) % n;
-        const tp  = rp[ti];
+        const ti   = ((idx - k * 2) % n + n) % n;
+        const tp   = rp[ti];
         const frac = k / TAIL;
         ctx.globalAlpha = opacity * frac * 0.55;
         ctx.fillStyle   = `hsl(${h}, 85%, 70%)`;
@@ -264,7 +261,7 @@
         ctx.arc(tp.x + sx * frac, tp.y + sy * frac, s * frac * 2.8, 0, Math.PI * 2);
         ctx.fill();
       }
-      ctx.restore();
+      ctx.globalAlpha = 1;
 
       // Fish body + forked tail
       const px = pos.x + sx, py = pos.y + sy;

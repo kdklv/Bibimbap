@@ -362,50 +362,64 @@
     // ─── Draw ────────────────────────────────────────────────────────────────
     const ARROW_SIZE = 0.22;   // fraction of CELL
 
-    function drawArrow(col, row, occupied) {
-      const cell = grid[row][col];
-      const c    = cellCenter(col, row);
-      const sz   = CELL * ARROW_SIZE;
-
-      ctx.save();
-      ctx.translate(c.x, c.y);
-      ctx.rotate(cell.animAngle);
-      // Arrows are navigational hints only — the light trails are the main visual
-      ctx.globalAlpha  = occupied ? 0.65 : 0.07;
-
-      if (occupied) {
-        ctx.shadowBlur  = 18;
-        ctx.shadowColor = 'rgba(160,196,255,0.9)';
-      }
-
-      ctx.strokeStyle = '#a0c4ff';
-      ctx.lineWidth   = occupied ? 2 : 1.2;
-      ctx.lineCap     = 'round';
-      ctx.lineJoin    = 'round';
-
-      // Simple chevron arrow pointing right (rotated by animAngle)
-      ctx.beginPath();
-      ctx.moveTo(-sz, -sz * 0.55);
-      ctx.lineTo(sz,  0);
-      ctx.lineTo(-sz,  sz * 0.55);
-      ctx.stroke();
-
-      ctx.restore();
-    }
-
     function draw(now) {
       // 1. Very slow fade — trails persist long enough to build geometric patterns
       ctx.fillStyle = 'rgba(8,12,20,0.12)';
       ctx.fillRect(0, 0, W, H);
 
-      // 2. Grid arrows
+      // 2. Grid arrows — build occupied set first
       const occupiedSet = new Set(
         plankton.filter(p => p.state === 'alive').map(p => `${p.col},${p.row}`)
       );
 
+      // Batch all dim arrows in a single path — eliminates ~180 save/restore/stroke per frame
+      const sz = CELL * ARROW_SIZE;
+      ctx.save();
+      ctx.strokeStyle = '#a0c4ff';
+      ctx.lineWidth   = 1.2;
+      ctx.lineCap     = 'round';
+      ctx.lineJoin    = 'round';
+      ctx.globalAlpha = 0.07;
+      ctx.beginPath();
       for (let r = 0; r < ROWS; r++) {
         for (let c = 0; c < COLS; c++) {
-          drawArrow(c, r, occupiedSet.has(`${c},${r}`));
+          if (occupiedSet.has(`${c},${r}`)) continue;
+          const cell = grid[r][c];
+          const cx   = offsetX + c * CELL + CELL / 2;
+          const cy   = offsetY + r * CELL + CELL / 2;
+          const cos  = Math.cos(cell.animAngle), sin = Math.sin(cell.animAngle);
+          const px   = -sin * sz * 0.55, py = cos * sz * 0.55;  // perpendicular offset
+          ctx.moveTo(cx - cos*sz + px, cy - sin*sz + py);   // back-top
+          ctx.lineTo(cx + cos*sz,      cy + sin*sz);         // tip
+          ctx.lineTo(cx - cos*sz - px, cy - sin*sz - py);   // back-bottom
+        }
+      }
+      ctx.stroke();
+      ctx.restore();
+
+      // Draw occupied arrows individually (max 4, each with glow)
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          if (!occupiedSet.has(`${c},${r}`)) continue;
+          const cell = grid[r][c];
+          const ccx  = offsetX + c * CELL + CELL / 2;
+          const ccy  = offsetY + r * CELL + CELL / 2;
+          const cos  = Math.cos(cell.animAngle), sin = Math.sin(cell.animAngle);
+          const px   = -sin * sz * 0.55, py = cos * sz * 0.55;
+          ctx.save();
+          ctx.globalAlpha  = 0.65;
+          ctx.shadowBlur   = 18;
+          ctx.shadowColor  = 'rgba(160,196,255,0.9)';
+          ctx.strokeStyle  = '#a0c4ff';
+          ctx.lineWidth    = 2;
+          ctx.lineCap      = 'round';
+          ctx.lineJoin     = 'round';
+          ctx.beginPath();
+          ctx.moveTo(ccx - cos*sz + px, ccy - sin*sz + py);
+          ctx.lineTo(ccx + cos*sz,      ccy + sin*sz);
+          ctx.lineTo(ccx - cos*sz - px, ccy - sin*sz - py);
+          ctx.stroke();
+          ctx.restore();
         }
       }
 
