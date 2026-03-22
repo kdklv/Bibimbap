@@ -1,8 +1,4 @@
 const Audio = {
-  async init() {
-    await Tone.start();
-  },
-
   scales: {
     pentatonic: [0, 2, 4, 7, 9],
     gamelan:    [0, 1, 5, 7, 8],

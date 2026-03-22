@@ -32,9 +32,9 @@
     // ─── Audio ────────────────────────────────────────────────────────────────
     let audioCtx = null, masterOut = null, convolver = null;
 
-    function initAudio() {
+    async function initAudio() {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      audioCtx.resume();
+      await audioCtx.resume();
       masterOut = audioCtx.createGain();
       masterOut.gain.value = 0.45;
       masterOut.connect(audioCtx.destination);
@@ -54,6 +54,7 @@
 
     function playNote(midi, vol, dur = 2.6) {
       if (!audioCtx) return;
+      if (audioCtx.state === 'suspended') { audioCtx.resume(); return; }
       const freq = 440 * Math.pow(2, (midi - 69) / 12);
       const now  = audioCtx.currentTime;
       const osc1 = audioCtx.createOscillator();
@@ -458,8 +459,18 @@
     }
 
     const beginEl = document.getElementById('begin');
-    function begin() {
-      initAudio();
+    async function begin() {
+      await initAudio();
+
+      // Re-resume after iOS background suspension
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && audioCtx && audioCtx.state === 'suspended')
+          audioCtx.resume();
+      });
+      window.addEventListener('pageshow', () => {
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      });
+
       beginEl.style.opacity = '0'; beginEl.style.pointerEvents = 'none';
       setTimeout(() => beginEl.remove(), 700);
       setupCanvas(); setupInput(); setupKeyboard();

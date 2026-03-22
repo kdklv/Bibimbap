@@ -37,7 +37,7 @@
       display: grid;
       grid-template-columns: 2fr 1fr 2fr;
       grid-template-rows: 1fr 1fr;
-      gap: 6px;
+      gap: 5px;
       flex: 1;
       min-height: 0;
     }
@@ -114,7 +114,68 @@ function initCanvas(id) {
   return { ctx, W, H };
 }
 
+// ── Stone clip-paths ─────────────────────────────────────────────────────────
+// Each card is clipped to an organic rounded-stone shape.
+// Adjacent cards share matching bow depths so the mortar gap widens naturally
+// toward the middle of each shared edge (like real stone masonry).
+//
+// Bows are inward (concave) per side. Matching pairs:
+//   luminaria-right(10) ↔ hanenbow-left(10)
+//   luminaria-bottom(8) ↔ tracy-top(8)
+//   hanenbow-bottom(6)  ↔ nanocarp-top(6)
+//   tracy-right(6)      ↔ nanocarp-left(6)
+
+const STONE_DEFS = {
+  'card-luminaria': { corners: {tl:24, tr:7,  br:7,  bl:12}, bows: {top:3, right:10, bottom:8, left:3}  },
+  'card-hanenbow':  { corners: {tl:7,  tr:24, br:18, bl:6 }, bows: {top:3, right:3,  bottom:6, left:10} },
+  'card-tracy':     { corners: {tl:12, tr:6,  br:9,  bl:24}, bows: {top:8, right:6,  bottom:3, left:3}  },
+  'card-nanocarp':  { corners: {tl:6,  tr:18, br:24, bl:12}, bows: {top:6, right:3,  bottom:3, left:6}  },
+};
+
+function stonePath(W, H, {tl, tr, br, bl}, {top, right, bottom, left}) {
+  const k = 0.552; // cubic bezier circle approximation constant
+  const maxR = Math.min(W, H) * 0.45;
+  const [ctL, ctR, cbR, cbL] = [tl, tr, br, bl].map(v => Math.min(v, maxR));
+  const topLen    = W - ctL - ctR;
+  const rightLen  = H - ctR - cbR;
+  const bottomLen = W - cbR - cbL;
+  const leftLen   = H - cbL - ctL;
+  const n = v => Math.round(v * 10) / 10;
+
+  return [
+    `M ${n(ctL)} 0`,
+    // top edge — bows inward (downward) by `top` px
+    `C ${n(ctL + topLen*0.3)} ${n(top)} ${n(W-ctR - topLen*0.3)} ${n(top)} ${n(W-ctR)} 0`,
+    // TR corner
+    `C ${n(W - ctR*(1-k))} 0 ${W} ${n(ctR*(1-k))} ${W} ${n(ctR)}`,
+    // right edge — bows inward (leftward) by `right` px
+    `C ${n(W-right)} ${n(ctR + rightLen*0.3)} ${n(W-right)} ${n(H-cbR - rightLen*0.3)} ${W} ${n(H-cbR)}`,
+    // BR corner
+    `C ${W} ${n(H - cbR*(1-k))} ${n(W - cbR*(1-k))} ${H} ${n(W-cbR)} ${H}`,
+    // bottom edge — bows inward (upward) by `bottom` px
+    `C ${n(W-cbR - bottomLen*0.3)} ${n(H-bottom)} ${n(cbL + bottomLen*0.3)} ${n(H-bottom)} ${n(cbL)} ${H}`,
+    // BL corner
+    `C ${n(cbL*(1-k))} ${H} 0 ${n(H - cbL*(1-k))} 0 ${n(H-cbL)}`,
+    // left edge — bows inward (rightward) by `left` px
+    `C ${n(left)} ${n(H-cbL - leftLen*0.3)} ${n(left)} ${n(ctL + leftLen*0.3)} 0 ${n(ctL)}`,
+    // TL corner
+    `C 0 ${n(ctL*(1-k))} ${n(ctL*(1-k))} 0 ${n(ctL)} 0`,
+    `Z`,
+  ].join(' ');
+}
+
+function applyStoneShapes() {
+  Object.entries(STONE_DEFS).forEach(([cls, {corners, bows}]) => {
+    const el = document.querySelector('.' + cls);
+    if (!el) return;
+    el.style.clipPath = `path('${stonePath(el.offsetWidth, el.offsetHeight, corners, bows)}')`;
+  });
+}
+
+window.addEventListener('resize', applyStoneShapes);
+
 window.addEventListener('load', () => requestAnimationFrame(() => {
+  applyStoneShapes();
   const L  = initCanvas('cv-l');
   const Ha = initCanvas('cv-h');
   const T  = initCanvas('cv-t');
