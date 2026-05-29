@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>slosh</title>
+  <link rel="stylesheet" href="../shared/theme.css">
+  <style>
+    .begin-screen { flex-direction: column; gap: 10px; }
+    .begin-screen .name { font-size: 30px; letter-spacing: 0.22em; color: rgba(232,234,240,0.88); }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div class="begin-screen" id="begin">
+    <div class="name">slosh</div>
+    <div>touch to begin</div>
+  </div>
+  <script src="../shared/audio.js"></script>
+  <script>
+  'use strict';
+
+  const canvas = document.getElementById('canvas');
+  let ctx, W, H;
+
+  function setupCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    W = rect.width; H = rect.height;
+    canvas.width  = W * dpr;
+    canvas.height = H * dpr;
+    ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+  }
+
+  // ─── Audio ────────────────────────────────────────────────────────────────
+  let audioCtx, masterGain, reverbNode;
+  let activeVoices = 0;
+
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    audioCtx.resume();
+
+    const warmth = audioCtx.createBiquadFilter();
+    warmth.type = 'lowpass'; warmth.frequency.value = 4200; warmth.Q.value = 0.5;
+    warmth.connect(audioCtx.destination);
+
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.28;
+    masterGain.connect(warmth);
+
+    const sr = audioCtx.sampleRate;
+    const len = Math.floor(sr * 1.8);
+    const buf = audioCtx.createBuffer(2, len, sr);
+    for (let c = 0; c < 2; c++) {
+      const ch = buf.getChannelData(c);
+      for (let i = 0; i < len; i++)
+        ch[i] = (Math.random()*2 - 1) * Math.pow(1 - i/len, 2.0);
+    }
+    reverbNode = audioCtx.createConvolver();
+    reverbNode.buffer = buf;
+    const wet = audioCtx.createGain(); wet.gain.value = 0.42;
+    reverbNode.connect(wet); wet.connect(masterGain);
+
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && audioCtx.state === 'suspended') audioCtx.resume();
+    });
+    window.addEventListener('pageshow', () => {
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    });
+  }
+
+  function playNote(midi, vol = 0.12, dur = 0.8) {
+    if (!audioCtx || activeVoices >= 8) return;
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const freq = 440 * Math.pow(2, (midi - 69) / 12);
+    const now  = audioCtx.currentTime;
+    activeVoices++;
+    setTimeout(() => activeVoices--, (dur + 0.2) * 1000);
+
+    const osc   = audioCtx.createOscillator();
+    const third = audioCtx.createOscillator(); // 3rd harmonic — warmth
+    const thirdG = audioCtx.createGain();
+    const env   = audioCtx.createGain();
+
+    osc.type = 'sine'; osc.frequency.value = freq;
+    third.type = 'sine'; third.frequency.value = freq * 3;
+    thirdG.gain.value = 0.04;
+    third.connect(thirdG); thirdG.connect(env);
+
+    env.gain.setValueAtTime(0.0001, now);
+    env.gain.linearRampToValueAtTime(vol, now + 0.012);
+    env.gain.exponentialRampToValueAtTime(vol * 0.38, now + 0.10);
+    env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+
+    osc.connect(env); env.connect(masterGain); env.connect(reverbNode);
+    osc.start(now); third.start(now);
+    osc.stop(now + dur + 0.1); third.stop(now + dur + 0.1);
+  }
+
+  // ─── Blob physics (Verlet soft-body) ──────────────────────────────────────
+  const geo = {
+    limit: (c, m) => { const l = Math.sqrt(c.x*c.x+c.y*c.y); return l>m ? {x:c.x/l*m,y:c.y/l*m} : c; },
+    lineNormal: (x1,y1,x2,y2) => ({x:y2-y1, y:-(x2-x1)}),
+    polyArea: p => { let a=0,n=p.length; for(let i=1;i<=n;i++) a+=p[i%n].x*(p[(i+1)%n].y-p[(i-1)%n].y); return a/2; },
+  };
+
+  class HG {
+    constructor(w,h,cs) {
+      this.cs=cs; this.g=new Map();
+      for(let y=0;y<h/cs;y++) for(let x=0;x<w/cs;x++) this.g.set(x+','+y,new Set());
+    }
+    idx(v)   { return (v/this.cs)|0; }
+    key(x,y) { return this.idx(x)+','+this.idx(y); }
+    add(v)   { const k=this.key(v.x,v.y); return this.g.has(k)?this.g.get(k).add(v):this.g.set(k,new Set().add(v)); }
+    q(x,y,r) {
+      const x0=this.idx(x-r)-1,x1=this.idx(x+r)+1,y0=this.idx(y-r)-1,y1=this.idx(y+r)+1;
+      const res=new Set();
+      for(let xi=x0;xi<=x1;xi++) for(let yi=y0;yi<=y1;yi++){const k=xi+','+yi;if(this.g.has(k))this.g.get(k).forEach(res.add,res);}
+      return res;
+    }
+    client(i) { return new HGC(this,i); }
+  }
+  class HGC {
+    constructor(g,i){this.g=g;this.i=i;this.ix=g.idx(i.x);this.iy=g.idx(i.y);this.c=g.add(i);}
+    upd(){const nx=this.g.idx(this.i.x),ny=this.g.idx(this.i.y);if(nx===this.ix&&ny===this.iy)return;this.c.delete(this.i);this.c=this.g.add(this.i);this.ix=nx;this.iy=ny;}
+  }
+  class DJ {
+    constructor(a,b,len,s){this.a=a;this.b=b;this.len=len;this.s=s;}
+    upd(dt=1){
+      const dx=this.b.x-this.a.x,dy=this.b.y-this.a.y,m=Math.sqrt(dx*dx+dy*dy),dm=this.len-m;
+      if(m<=0)return;
+      const dA=(this.a.mass/(this.a.mass+this.b.mass)*dm*this.s/m)*-dt;
+      const dB=(this.b.mass/(this.a.mass+this.b.mass)*dm*this.s/m)*dt;
+      this.a.move(dx*dA,dy*dA); this.b.move(dx*dB,dy*dB);
+    }
+  }
+  class P {
+    constructor(o){
+      this.x=o.x;this.y=o.y;this.px=o.x;this.py=o.y;
+      this.vx=0;this.vy=0;this.r=o.radius??10;
+      this.damping=o.damping??0.9;this.friction=o.friction??0.1;
+      this.mass=o.mass??1;this.parent=null;
+    }
+    setC(c){this.c=c;}
+    move(dx,dy){this.x+=dx;this.y+=dy;}
+    addF(fx,fy){this.vx+=fx;this.vy+=fy;}
+    testCol(ox,oy,or){const dx=ox-this.x,dy=oy-this.y,d=dx*dx+dy*dy,cr=or+this.r;if(d<cr*cr){const fm=Math.sqrt(d)-cr,im=1/d;return{x:dx*im*fm,y:dy*im*fm};}return null;}
+    col(ox,oy,or){const dx=ox-this.x,dy=oy-this.y,d=dx*dx+dy*dy,cr=or+this.r;if(d<cr*cr){const fm=Math.sqrt(d)-cr,im=1/d;this.move(dx*im*fm,dy*im*fm);this.px+=(this.x-this.px)*this.friction;this.py+=(this.y-this.py)*this.friction;return{x:dx*im*fm,y:dy*im*fm};}return null;}
+    con(l,t,r,b){let c=false;if(this.x>r-2){this.x=r-2;c=true;}else if(this.x<l+2){this.x=l+2;c=true;}if(this.y>b-2){this.y=b-2;c=true;}else if(this.y<t+2){this.y=t+2;c=true;}if(c){this.px+=(this.x-this.px)*this.friction;this.py+=(this.y-this.py)*this.friction;}}
+    upd(dt=1){this.px=this.x;this.py=this.y;this.x+=this.vx*dt;this.y+=this.vy*dt;}
+    end(dt=1){const m=this.damping/dt;this.vx=(this.x-this.px)*m;this.vy=(this.y-this.py)*m;}
+    updC(){if(this.c)this.c.upd();}
+  }
+  class CP extends P { setR(v){this.isR=v;} setN(v){this.n=v;} setP(v){this.p=v;} }
+
+  let grid, evDist, parts=[], jnts=[], blbs=[];
+  const DAMP=0.97, FRIC=0.003, TENS=0.95, INFL=0.5, MASS=100;
+
+  function genBlob(ox,oy,r) {
+    const n = Math.floor(r*Math.PI*2/evDist);
+    const verts = Array.from({length:n}, (_,i) => {
+      const a = i/n*Math.PI*2;
+      const p = new CP({x:Math.cos(a)*r+ox, y:Math.sin(a)*r+oy, radius:evDist, damping:DAMP, friction:FRIC, mass:MASS});
+      p.setC(grid.client(p));
+      return p;
+    });
+    verts.forEach((v,i) => { v.setP(verts[(i+n-1)%n]); v.setN(verts[(i+1)%n]); if(i===0) v.setR(true); });
+    const js = verts.flatMap(v => [new DJ(v,v.n,evDist,0.75*TENS), new DJ(v,v.n.n,evDist*2,0.25*TENS)]);
+    const ar = geo.polyArea(verts) * (0.6 + Math.random()*0.3);
+    const blob = {ar, ca:ar, ad:0, rp:verts[0], ps:verts, js, r};
+    blob.ps.forEach(p => { p.parent=blob; });
+    return blob;
+  }
+
+  function initBlob() {
+    const rad = Math.min(W,H) * (Math.min(W,H) < 600 ? 0.38 : 0.30);
+    evDist = 0.025 * Math.min(W, H);
+    grid = new HG(W, H, Math.floor(evDist*2));
+    parts=[]; jnts=[]; blbs=[];
+    const b = genBlob(W/2, H/2, rad);
+    blbs.push(b); parts.push(...b.ps); jnts.push(...b.js);
+  }
+
+  function pointIn(px, py) {
+    for(let i=blbs.length;i--;){
+      const pts=blbs[i].ps; let inside=false;
+      for(let j=0,k=pts.length-1; j<pts.length; k=j++){
+        const xj=pts[j].x,yj=pts[j].y,xk=pts[k].x,yk=pts[k].y;
+        if((yj>py)!==(yk>py) && px<(xk-xj)*(py-yj)/(yk-yj)+xj) inside=!inside;
+      }
+      if(inside) return true;
+    }
+    return false;
+  }
+
+  // ─── Nuclei ───────────────────────────────────────────────────────────────
+  // 5 note palettes — press 1-5 to switch, R to scatter
+  const PALETTES = [
+    [60, 64, 67, 69, 72], // C pentatonic
+    [62, 65, 69, 71, 74], // D pentatonic
+    [55, 59, 62, 64, 67], // G pentatonic (lower)
+    [57, 60, 64, 65, 69], // A pentatonic
+    [53, 57, 60, 62, 65], // F pentatonic
+  ];
+  let currentPalette = 0;
+
+  // hue, radius inversely proportional to pitch (lower = bigger)
+  const NUCLEUS_DEFS = [
+    { hue: 30,  r: 13 }, // orange  — C (lowest, biggest)
+    { hue: 90,  r: 11 }, // lime    — E
+    { hue: 170, r: 10 }, // teal    — G
+    { hue: 240, r:  9 }, // blue    — A
+    { hue: 300, r:  8 }, // magenta — C5 (highest, smallest)
+  ];
+
+  let nuclei = [];
+  let wallFlashes = []; // { x, y, hue, life, maxLife }
+
+  function initNuclei() {
+    nuclei = NUCLEUS_DEFS.map((def, i) => ({
+      x: W/2 + (Math.random()-0.5)*60,
+      y: H/2 + (Math.random()-0.5)*60,
+      vx: (Math.random()-0.5)*3,
+      vy: (Math.random()-0.5)*3,
+      r: def.r,
+      hue: def.hue,
+      midi: PALETTES[currentPalette][i],
+      flash: 0,
+      cooldown: 0,
+      trail: [],
+      wallPt: null,
+      wallDist: Infinity,
+    }));
+    wallFlashes = [];
+  }
+
+  function scatterNuclei() {
+    for(const nuc of nuclei) {
+      const a = Math.random()*Math.PI*2;
+      const spd = 3 + Math.random()*4;
+      nuc.vx = Math.cos(a)*spd;
+      nuc.vy = Math.sin(a)*spd;
+      nuc.trail = [];
+    }
+  }
+
+  function closestPtOnSeg(px,py,ax,ay,bx,by) {
+    const dx=bx-ax, dy=by-ay, len2=dx*dx+dy*dy;
+    if(len2===0) return {x:ax,y:ay};
+    const t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/len2));
+    return {x:ax+t*dx, y:ay+t*dy};
+  }
+
+  function updateNuclei() {
+    if(!blbs.length) return;
+    const verts = blbs[0].ps;
+
+    // Nucleus-nucleus repulsion (O(n²), n=5 → 10 pairs)
+    for(let i=0;i<nuclei.length;i++){
+      for(let j=i+1;j<nuclei.length;j++){
+        const a=nuclei[i], b=nuclei[j];
+        const dx=b.x-a.x, dy=b.y-a.y;
+        const d=Math.hypot(dx,dy);
+        const REP=a.r+b.r+14;
+        if(d<REP && d>0.001){
+          const push=(REP-d)*0.18/d;
+          a.vx-=dx*push; a.vy-=dy*push;
+          b.vx+=dx*push; b.vy+=dy*push;
+        }
+      }
+    }
+
+    for(const nuc of nuclei) {
+      // Slight gravity — snow-globe feel
+      nuc.vy += 0.045;
+
+      nuc.vx += (Math.random()-0.5)*0.15;
+      nuc.vy += (Math.random()-0.5)*0.15;
+
+      const spd = Math.hypot(nuc.vx, nuc.vy);
+      if(spd > 7)   { nuc.vx *= 7/spd; nuc.vy *= 7/spd; }
+      if(spd < 0.5 && spd > 0.001) { nuc.vx *= 0.5/spd; nuc.vy *= 0.5/spd; }
+
+      nuc.x += nuc.vx;
+      nuc.y += nuc.vy;
+
+      // Comet trail
+      nuc.trail.push({x:nuc.x, y:nuc.y});
+      if(nuc.trail.length > 14) nuc.trail.shift();
+
+      if(nuc.flash    > 0) nuc.flash--;
+      if(nuc.cooldown > 0) nuc.cooldown--;
+
+      // Find closest wall segment + outward normal
+      let minDist=Infinity, bestNx=0, bestNy=1, bestCp=null;
+      for(const v of verts) {
+        const cp = closestPtOnSeg(nuc.x,nuc.y, v.x,v.y, v.n.x,v.n.y);
+        const dx=nuc.x-cp.x, dy=nuc.y-cp.y;
+        const d = Math.hypot(dx,dy);
+        if(d < minDist) {
+          minDist=d; bestCp=cp;
+          if(d>0.001){ bestNx=dx/d; bestNy=dy/d; }
+        }
+      }
+      nuc.wallPt   = bestCp;
+      nuc.wallDist = minDist;
+
+      // Safety escape
+      if(!pointIn(nuc.x, nuc.y)) {
+        nuc.x -= bestNx*(minDist + nuc.r + 2);
+        nuc.y -= bestNy*(minDist + nuc.r + 2);
+        const dot = nuc.vx*bestNx + nuc.vy*bestNy;
+        nuc.vx -= 2*dot*bestNx;
+        nuc.vy -= 2*dot*bestNy;
+        continue;
+      }
+
+      // Wall collision — reflect + sound + flash
+      const HIT = nuc.r + 5;
+      if(minDist < HIT) {
+        const overlap = HIT - minDist;
+        nuc.x += bestNx*overlap;
+        nuc.y += bestNy*overlap;
+        const dot = nuc.vx*bestNx + nuc.vy*bestNy;
+        if(dot < 0) {
+          nuc.vx -= 2*dot*bestNx * 0.80;
+          nuc.vy -= 2*dot*bestNy * 0.80;
+        }
+        if(nuc.cooldown <= 0) {
+          const vel = Math.abs(dot);
+          playNote(nuc.midi, Math.min(0.20, 0.06 + vel*0.018), 0.80);
+          nuc.flash    = 18;
+          nuc.cooldown = 18;
+          if(bestCp) wallFlashes.push({x:bestCp.x, y:bestCp.y, hue:nuc.hue, life:30, maxLife:30});
+        }
+      }
+    }
+
+    // Decay wall flashes
+    for(let i=wallFlashes.length-1;i>=0;i--){
+      wallFlashes[i].life--;
+      if(wallFlashes[i].life<=0) wallFlashes.splice(i,1);
+    }
+  }
+
+  // ─── Input ────────────────────────────────────────────────────────────────
+  let mx, my, mxd, myd;
+  let gusts = [];
+  const GUST_FRAMES = 14;
+  let bs, bm;
+
+  // Radial push outward from click point
+  function pushBlob(px, py) {
+    gusts.push({ px, py, str: 7200*TENS, life: GUST_FRAMES });
+  }
+
+  function setupInput() {
+    canvas.addEventListener('pointermove', e => {
+      const r = canvas.getBoundingClientRect();
+      mxd = e.clientX - r.left;
+      myd = e.clientY - r.top;
+    });
+    canvas.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      const r = canvas.getBoundingClientRect();
+      pushBlob(e.clientX - r.left, e.clientY - r.top);
+    });
+    document.addEventListener('keydown', e => {
+      if(e.code==='KeyR') { scatterNuclei(); return; }
+      const n = parseInt(e.key);
+      if(n>=1 && n<=5) {
+        currentPalette = n-1;
+        nuclei.forEach((nuc,i) => { nuc.midi = PALETTES[currentPalette][i]; });
+      }
+    });
+  }
+
+  // ─── Draw ─────────────────────────────────────────────────────────────────
+  function draw() {
+    ctx.fillStyle = 'rgba(8,12,20,0.28)';
+    ctx.fillRect(0, 0, W, H);
+
+    if(blbs.length) {
+      const b=blbs[0]; let cp=b.rp;
+      ctx.beginPath();
+      ctx.moveTo(cp.x, cp.y); cp=cp.n;
+      do { ctx.lineTo(cp.x, cp.y); cp=cp.n; } while(cp !== b.rp);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(160,196,255,0.07)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(232,234,240,0.55)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // Proximity aura — wall glows as nucleus approaches
+      for(const nuc of nuclei) {
+        if(!nuc.wallPt || nuc.wallDist > 75) continue;
+        const prox = 1 - nuc.wallDist/75;
+        ctx.save();
+        ctx.shadowColor = `hsl(${nuc.hue},90%,65%)`;
+        ctx.shadowBlur  = 18;
+        ctx.globalAlpha = prox * 0.55;
+        ctx.fillStyle   = `hsl(${nuc.hue},90%,70%)`;
+        ctx.beginPath();
+        ctx.arc(nuc.wallPt.x, nuc.wallPt.y, 3.5, 0, Math.PI*2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Wall flash spots — linger after collision
+      for(const wf of wallFlashes) {
+        const t = wf.life / wf.maxLife;
+        ctx.save();
+        ctx.shadowColor = `hsl(${wf.hue},95%,70%)`;
+        ctx.shadowBlur  = 24 * t;
+        ctx.globalAlpha = t * 0.9;
+        ctx.fillStyle   = `hsl(${wf.hue},90%,75%)`;
+        ctx.beginPath();
+        ctx.arc(wf.x, wf.y, 5 * (0.5+t*0.5), 0, Math.PI*2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    // Nucleus comet trails
+    for(const nuc of nuclei) {
+      const TL = nuc.trail.length;
+      for(let k=0;k<TL;k++){
+        const frac = (k+1)/TL;
+        ctx.globalAlpha = frac * 0.45;
+        ctx.fillStyle   = `hsl(${nuc.hue},85%,65%)`;
+        ctx.beginPath();
+        ctx.arc(nuc.trail[k].x, nuc.trail[k].y, nuc.r * frac * 0.7, 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // Nuclei
+    for(const nuc of nuclei) {
+      const flashing = nuc.flash > 0;
+      ctx.save();
+      ctx.shadowColor = `hsl(${nuc.hue},90%,65%)`;
+      ctx.shadowBlur  = flashing ? 32 : 14;
+      ctx.fillStyle   = `hsl(${nuc.hue},90%,${flashing?82:66}%)`;
+      ctx.globalAlpha = flashing ? 1.0 : 0.88;
+      ctx.beginPath();
+      ctx.arc(nuc.x, nuc.y, nuc.r * (flashing ? 1.5 : 1), 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Cursor repulsion ring
+    ctx.beginPath();
+    ctx.arc(mx, my, bs, 0, Math.PI*2);
+    ctx.strokeStyle = 'rgba(232,234,240,0.16)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // ─── Loop ─────────────────────────────────────────────────────────────────
+  let prev = 0;
+
+  function loop(t) {
+    const dt = Math.min((t-prev)/1000, 0.05);
+    prev = t;
+
+    mx += (mxd-mx)*0.15;
+    my += (myd-my)*0.15;
+
+    for(let i=parts.length;i--;) parts[i].updC();
+
+    // Radial gust: push blob particles outward from click point
+    for(let g=gusts.length;g--;){
+      const gust=gusts[g]; gust.life--;
+      const fade=(gust.life/GUST_FRAMES)**2;
+      if(gust.life<=0){gusts.splice(g,1);continue;}
+      for(let i=parts.length;i--;){
+        const p=parts[i];
+        const dx=p.x-gust.px, dy=p.y-gust.py;
+        const d=Math.sqrt(dx*dx+dy*dy);
+        if(d<1||d>Math.min(W,H)*0.7)continue;
+        const nx=dx/d, ny=dy/d;
+        const falloff=(1-d/(Math.min(W,H)*0.7))**2;
+        p.vx+=nx*gust.str*falloff*fade*dt;
+        p.vy+=ny*gust.str*falloff*fade*dt;
+      }
+    }
+
+    const sdt=dt/20;
+    for(let s=20;s--;){
+      for(let i=blbs.length;i--;){const b=blbs[i];b.ca=geo.polyArea(b.ps);b.ad=(b.ar-b.ca)/b.ar;}
+      for(let i=parts.length;i--;){const p=parts[i];p.addF(0,1000*sdt);const v=geo.limit({x:p.vx,y:p.vy},(evDist/sdt)*2);p.vx=v.x;p.vy=v.y;p.upd(sdt);}
+      for(let i=parts.length;i--;){const p=parts[i];const ln=geo.lineNormal(p.p.x,p.p.y,p.n.x,p.n.y);const d=p.parent.ad*INFL;p.move(ln.x*d,ln.y*d);}
+      for(let i=jnts.length;i--;) jnts[i].upd(1);
+      for(let i=parts.length;i--;){const p=parts[i];grid.q(p.x,p.y,p.r).forEach(o=>{if(o===p||o===p.n||o===p.p)return;const f=p.testCol(o.x,o.y,o.r);if(f){p.move(f.x*0.5,f.y*0.5);o.move(-f.x*0.5,-f.y*0.5);}});}
+      for(let i=parts.length;i--;){const p=parts[i];p.col(mx,my,bs+bm);p.con(0,0,W,H);p.end(sdt);}
+    }
+
+    updateNuclei();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // ─── Begin gate ───────────────────────────────────────────────────────────
+  const beginEl = document.getElementById('begin');
+
+  function begin() {
+    initAudio();
+    setupCanvas();
+
+    const mob = Math.min(W,H) < 600;
+    bs  = Math.min(W,H) * (mob ? 0.09 : 0.07);
+    bm  = mob ? 60 : 100;
+    mx  = mxd = W/2;
+    my  = myd = H/2;
+
+    initBlob();
+    initNuclei();
+    setupInput();
+
+    window.addEventListener('resize', () => {
+      setupCanvas();
+      const m = Math.min(W,H) < 600;
+      bs = Math.min(W,H) * (m ? 0.09 : 0.07);
+      bm = m ? 60 : 100;
+      mx = mxd = W/2; my = myd = H/2;
+      initBlob();
+      initNuclei();
+    });
+
+    beginEl.style.opacity = '0';
+    beginEl.style.pointerEvents = 'none';
+    setTimeout(() => beginEl.remove(), 700);
+
+    requestAnimationFrame(loop);
+  }
+
+  document.addEventListener('pointerdown', begin, { once: true });
+  </script>
+</body>
+</html>

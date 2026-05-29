@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>blob</title>
+<style>
+  * { margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #222; }
+  canvas { display: block; position: fixed; top: 0; left: 0; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const settings = {
+  desktop: { bouncerSizeFactor: 0.09, radiusFactor: 0.3, speed: 0.07, damping: 0.97, friction: 0.003, bouncerMargin: 100 },
+  mobile:  { bouncerSizeFactor: 0.09, radiusFactor: 0.4, speed: 0.04, damping: 0.985, friction: 0.001, bouncerMargin: 60 },
+};
+
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+
+let W, H, bs, rad, bm, damp, fric, ms = 100, tens = 0.95, infl = 0.5;
+
+// ─── TUNABLES ───────────────────────────────────────────
+// PUSH_STRENGTH: how violently the wind shoves the blob (default 8000)
+//   higher = more explosive; lower = gentler nudge
+//   tweak the 8000 value in the two pushBlob() calls below
+//
+// tens (tension): joint stiffness (0.2 = floppy, 3.0 = rigid)
+//   also multiplies push strength
+//
+// infl (inflation): area-preservation strength
+//   0 = blob freely deforms, 2 = fights to keep shape
+//
+// damp (damping): velocity decay per frame
+//   0.99 = floaty, 0.9 = snappy
+// ────────────────────────────────────────────────────────
+let mx, my, mxd, myd;
+let parts = [], jnts = [], blbs = [], evd;
+let wAng = -Math.PI/2;
+const WSTEP = Math.PI/6;
+
+// Smooth push: pending gusts that fade over multiple frames
+let gusts = [];
+const GUST_FRAMES = 12; // how many frames a gust lasts
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  const c = settings.desktop;
+  bs = W * c.bouncerSizeFactor;
+  rad = W * c.radiusFactor;
+  damp = c.damping;
+  fric = c.friction;
+  bm = c.bouncerMargin;
+  mx = W/2; my = H/2; mxd = W/2; myd = H/2;
+  init();
+}
+window.addEventListener("resize", resize);
+
+// Coordinate
+class C2 { constructor(x, y) { this.x = x; this.y = y; } }
+
+// Geometry
+const geo = {
+  lineNormal: (x1,y1,x2,y2) => ({x:y2-y1, y:-(x2-x1)}),
+  limit: (c,m) => { if (!c) return null; const l = Math.sqrt(c.x*c.x+c.y*c.y); return l > m ? {x:c.x/l*m, y:c.y/l*m} : c; },
+  polyArea: p => { let a = 0, n = p.length; for (let i = 1; i <= n; i++) a += p[i%n].x * (p[(i+1)%n].y - p[(i-1)%n].y); return a/2; },
+};
+
+// HashGrid
+class HG {
+  constructor(w,h,cs) {
+    this.cs=cs; this.g=new Map();
+    for (let y=0; y<h/cs; y++) for (let x=0; x<w/cs; x++) this.g.set(x+','+y, new Set());
+  }
+  idx(v) { return (v/this.cs)|0; }
+  key(x,y) { return this.idx(x)+','+this.idx(y); }
+  add(v) { const k=this.key(v.x,v.y); return this.g.has(k) ? this.g.get(k).add(v) : this.g.set(k, new Set().add(v)); }
+  rm(v) { const k=this.key(v.x,v.y); if (this.g.has(k)) this.g.get(k).delete(v); }
+  q(x,y,r) {
+    const x0=this.idx(x-r)-1, x1=this.idx(x+r)+1, y0=this.idx(y-r)-1, y1=this.idx(y+r)+1;
+    const res=new Set();
+    for (let xi=x0; xi<=x1; xi++) for (let yi=y0; yi<=y1; yi++) { const k=xi+','+yi; if (this.g.has(k)) this.g.get(k).forEach(res.add, res); }
+    return res;
+  }
+  client(i) { return new HGC(this,i); }
+}
+class HGC {
+  constructor(g,i) { this.g=g; this.i=i; this.ix=g.idx(i.x); this.iy=g.idx(i.y); this.c=g.add(i); }
+  upd() {
+    const nx=this.g.idx(this.i.x), ny=this.g.idx(this.i.x);
+    if (nx===this.ix && ny===this.iy) return;
+    this.c.delete(this.i); this.c=this.g.add(this.i); this.ix=nx; this.iy=ny;
+  }
+}
+
+// DistanceJoint
+class DJ {
+  constructor(a,b,len,s) { this.a=a; this.b=b; this.len=len; this.s=s; }
+  upd(dt=1) {
+    const dx=this.b.x-this.a.x, dy=this.b.y-this.a.y, m=Math.sqrt(dx*dx+dy*dy), dm=this.len-m;
+    if (m<=0) return;
+    const dA=(this.a.mass/(this.a.mass+this.b.mass)*dm*this.s/m)*-dt;
+    const dB=(this.b.mass/(this.a.mass+this.b.mass)*dm*this.s/m)*dt;
+    this.a.move(dx*dA, dy*dA); this.b.move(dx*dB, dy*dB);
+  }
+}
+
+// Particle
+class P extends C2 {
+  constructor(o) {
+    super(o.x,o.y); this.px=o.x; this.py=o.y;
+    this.vx=0; this.vy=0; this.r=o.radius??10;
+    this.damping=o.damping??0.9; this.friction=o.friction??0.1;
+    this.mass=o.mass??1; this.parent=o.parent;
+  }
+  setC(c) { this.c=c; }
+  move(dx,dy) { this.x+=dx; this.y+=dy; }
+  addF(fx,fy) { this.vx+=fx; this.vy+=fy; }
+  testCol(ox,oy,or) {
+    const dx=ox-this.x, dy=oy-this.y, d=dx*dx+dy*dy, cr=or+this.r;
+    if (d<cr*cr) { const fm=Math.sqrt(d)-cr, im=1/d; return new C2(dx*im*fm, dy*im*fm); }
+    return null;
+  }
+  col(ox,oy,or) {
+    const dx=ox-this.x, dy=oy-this.y, d=dx*dx+dy*dy, cr=or+this.r;
+    if (d<cr*cr) { const fm=Math.sqrt(d)-cr, im=1/d; this.move(dx*im*fm, dy*im*fm); this.px+= (this.x-this.px)*this.friction; this.py+= (this.y-this.py)*this.friction; return new C2(dx*im*fm, dy*im*fm); }
+    return null;
+  }
+  con(l,t,r,b) {
+    let c=false;
+    if (this.x>r-2) { this.x=r-2; c=true; } else if (this.x<l+2) { this.x=l+2; c=true; }
+    if (this.y>b-2) { this.y=b-2; c=true; } else if (this.y<t+2) { this.y=t+2; c=true; }
+    if (c) { this.px+= (this.x-this.px)*this.friction; this.py+= (this.y-this.py)*this.friction; }
+  }
+  upd(dt=1) { this.px=this.x; this.py=this.y; this.x+=this.vx*dt; this.y+=this.vy*dt; }
+  end(dt=1) { const m=this.damping/dt; this.vx=(this.x-this.px)*m; this.vy=(this.y-this.py)*m; }
+  updC() { if (this.c) this.c.upd(); }
+}
+class CP extends P {
+  setR(v) { this.isR=v; } setN(v) { this.n=v; } setP(v) { this.p=v; }
+}
+
+let grid, evDist;
+
+function genBlob(ox, oy, r) {
+  const n = Math.floor(r*Math.PI*2/evDist);
+  const verts = Array.from({length:n}, (_,i) => {
+    const a = i/n*Math.PI*2;
+    const p = new CP({x:Math.cos(a)*r+ox, y:Math.sin(a)*r+oy, radius:evDist, damping:damp, friction:fric, mass:ms});
+    p.setC(grid.client(p));
+    return p;
+  });
+  verts.forEach((v,i) => { v.setP(verts[(i+n-1)%n]); v.setN(verts[(i+1)%n]); if (i===0) v.setR(true); });
+  const js = verts.map(v => [new DJ(v, v.n, evDist, 0.75*tens), new DJ(v, v.n.n, evDist*2, 0.25*tens)]).flat();
+  const ar = geo.polyArea(verts)* (0.6+Math.random()*0.3);
+  const blob = {ar, ca:ar, ad:0, rp:verts[0], ps:verts, js, r};
+  blob.ps.forEach(p => { p.parent=blob; });
+  return blob;
+}
+
+function init() {
+  evDist = 0.025 * Math.min(W, H);
+  grid = new HG(W, H, Math.floor(evDist*2));
+  parts = []; jnts = []; blbs = [];
+  const b = genBlob(W/2, H/2, rad);
+  blbs.push(b); parts.push(...b.ps); jnts.push(...b.js);
+}
+
+function pointIn(px, py) {
+  for (let i=blbs.length; i--;) {
+    const pts=blbs[i].ps; let inside=false;
+    for (let j=0,k=pts.length-1; j<pts.length; k=j++) {
+      const xj=pts[j].x, yj=pts[j].y, xk=pts[k].x, yk=pts[k].y;
+      if ((yj>py)!==(yk>py) && px<(xk-xj)*(py-yj)/(yk-yj)+xj) inside=!inside;
+    }
+    if (inside) return true;
+  }
+  return false;
+}
+
+function pushBlob(px, py, str, fx, fy) {
+  gusts.push({ px, py, fx, fy, str, life: GUST_FRAMES, mult: pointIn(px, py) ? 3.5 : 1.5 });
+}
+
+canvas.addEventListener("mousemove", e => { mxd = e.clientX; myd = e.clientY; });
+canvas.addEventListener("touchmove", e => { e.preventDefault(); mxd = e.touches[0].clientX; myd = e.touches[0].clientY; }, {passive:false});
+canvas.addEventListener("mousedown", e => {
+  wAng = (wAng + WSTEP) % (Math.PI*2);
+  const fx = Math.cos(wAng), fy = Math.sin(wAng);
+  pushBlob(e.clientX, e.clientY, 8000*tens, fx, fy);
+});
+canvas.addEventListener("touchstart", e => {
+  e.preventDefault();
+  wAng = (wAng + WSTEP) % (Math.PI*2);
+  const fx = Math.cos(wAng), fy = Math.sin(wAng);
+  const t = e.touches[0];
+  pushBlob(t.clientX, t.clientY, 8000*tens, fx, fy);
+}, {passive:false});
+
+// Animation loop
+let prev = 0;
+function loop(t) {
+  const dt = Math.min((t-prev)/1000, 0.05);
+  prev = t;
+
+  mx += (mxd - mx) * 0.15;
+  my += (myd - my) * 0.15;
+
+  for (let i=parts.length; i--;) parts[i].updC();
+
+  // Apply gusts as a smooth multi-frame force
+  for (let g = gusts.length; g--;) {
+    const gust = gusts[g];
+    gust.life--;
+    const fade = (gust.life / GUST_FRAMES) ** 2;
+    if (gust.life <= 0) { gusts.splice(g, 1); continue; }
+    for (let i = parts.length; i--;) {
+      const p = parts[i];
+      const dx = p.x - gust.px, dy = p.y - gust.py;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d < 1 || d > W * 0.6) continue;
+      const falloff = (1 - d / (W * 0.6)) ** 2;
+      p.vx += gust.fx * gust.str * falloff * gust.mult * fade * dt;
+      p.vy += gust.fy * gust.str * falloff * gust.mult * fade * dt;
+    }
+  }
+
+  const sdt = dt / 20;
+
+  for (let s=20; s--;) {
+    for (let i=blbs.length; i--;) { const b=blbs[i]; b.ca=geo.polyArea(b.ps); b.ad=(b.ar-b.ca)/b.ar; }
+    for (let i=parts.length; i--;) { const p=parts[i]; p.addF(0, 1000*sdt); const v=geo.limit({x:p.vx,y:p.vy}, (evDist/sdt)*2); p.vx=v.x; p.vy=v.y; p.upd(sdt); }
+    for (let i=parts.length; i--;) { const p=parts[i]; const ln=geo.lineNormal(p.p.x,p.p.y,p.n.x,p.n.y); const d=p.parent.ad*infl; p.move(ln.x*d, ln.y*d); }
+    for (let i=jnts.length; i--;) jnts[i].upd(1);
+    for (let i=parts.length; i--;) { const p=parts[i]; grid.q(p.x,p.y,p.r).forEach(o=>{if(o===p||o===p.n||o===p.p)return;const f=p.testCol(o.x,o.y,o.r);if(f){p.move(f.x*0.5,f.y*0.5);o.move(-f.x*0.5,-f.y*0.5);}}); }
+    for (let i=parts.length; i--;) { const p=parts[i]; p.col(mx,my,bs+bm); p.con(0,0,W,H); p.end(sdt); }
+  }
+
+  // Clear and draw
+  ctx.fillStyle = "#222";
+  ctx.fillRect(0, 0, W, H);
+
+  // Draw blob
+  for (let i=blbs.length; i--;) {
+    const b=blbs[i]; let cp=b.rp;
+    ctx.beginPath();
+    ctx.moveTo(cp.x, cp.y); cp=cp.n;
+    do { ctx.lineTo(cp.x, cp.y); cp=cp.n; } while (cp !== b.rp);
+    ctx.closePath();
+    ctx.fillStyle = "#f0f0f0";
+    ctx.fill();
+  }
+
+  // Cursor
+  ctx.beginPath();
+  ctx.arc(mx, my, bs, 0, Math.PI*2);
+  ctx.fillStyle = "#f0f0f0";
+  ctx.globalAlpha = 0.3;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  requestAnimationFrame(loop);
+}
+
+resize();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
