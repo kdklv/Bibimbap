@@ -57,10 +57,13 @@
     // noise until a plankton enters one and suddenly starts looping.
     const DELTA_TO_DIR = { '0,-1': 'N', '1,0': 'E', '0,1': 'S', '-1,0': 'W' };
 
+    let hiddenLoops = []; // closed walks used for idle hinting
+
     function embedLoops() {
       const dirs    = ['N', 'E', 'S', 'W'];
       const claimed = new Set();   // cells already belonging to a loop
       const shuffle = a => a.sort(() => Math.random() - 0.5);
+      hiddenLoops = [];
 
       for (let attempt = 0; attempt < 12; attempt++) {
         const sc = 1 + Math.floor(Math.random() * (COLS - 2));
@@ -108,6 +111,7 @@
             cell.targetAngle = cell.animAngle + steps * Math.PI / 2;
             claimed.add(`${c},${r}`);
           }
+          hiddenLoops.push(path.map(([c, r]) => ({ c, r })));
         }
       }
     }
@@ -163,6 +167,8 @@
     let plankton     = [];
     let pulses       = [];
     let currentScale = 'gamelan';
+    let lastInputAt  = 0;
+    let hint         = null; // ghost that traces a hidden loop when the grid is left alone
 
     // ─── Audio (Web Audio API — works reliably on iOS) ───────────────────────
     let audioCtx  = null;
@@ -359,6 +365,67 @@
       }
     }
 
+    // ─── Idle hint — a secret loop gently redraws itself if nobody is playing ─
+    function noteInput() {
+      lastInputAt = performance.now();
+      if (hint) hint.dying = true;
+    }
+
+    function hintGlow(c, r) {
+      if (!hint || hint.alpha < 0.04) return 0;
+      const loop = hint.loop;
+      const n = loop.length;
+      for (let i = 0; i < n; i++) {
+        if (loop[i].c !== c || loop[i].r !== r) continue;
+        // Brightest just ahead of the ghost — the path drawing itself forward
+        let d = i - hint.idx - hint.u;
+        while (d < 0) d += n;
+        if (d < 5) return (1 - d / 5) * hint.alpha;
+        return 0;
+      }
+      return 0;
+    }
+
+    function updateHint(now) {
+      const idle = now - lastInputAt;
+      const busy = plankton.some(p => p.state === 'alive' || p.dragging);
+
+      if (hint) {
+        if (hint.dying || busy) hint.alpha -= 0.016;
+        else hint.alpha = Math.min(0.62, hint.alpha + 0.007);
+
+        const loop = hint.loop;
+        const n = loop.length;
+        hint.u += 0.018;
+        while (hint.u >= 1) {
+          hint.u -= 1;
+          hint.idx = (hint.idx + 1) % n;
+          hint.steps++;
+        }
+        const a = loop[hint.idx];
+        const b = loop[(hint.idx + 1) % n];
+        const ca = cellCenter(a.c, a.r);
+        const cb = cellCenter(b.c, b.r);
+        hint.x = ca.x + (cb.x - ca.x) * hint.u;
+        hint.y = ca.y + (cb.y - ca.y) * hint.u;
+        hint.trail.push({ x: hint.x, y: hint.y });
+        if (hint.trail.length > 36) hint.trail.shift();
+
+        if (hint.steps > n * 2.1) hint.dying = true;
+        if (hint.alpha <= 0) hint = null;
+        return;
+      }
+
+      if (busy || idle < 8000 || hiddenLoops.length === 0) return;
+      const loop = hiddenLoops[Math.floor(Math.random() * hiddenLoops.length)];
+      if (!loop || loop.length < 5) return;
+      const c0 = cellCenter(loop[0].c, loop[0].r);
+      hint = {
+        loop, idx: 0, u: 0, alpha: 0,
+        x: c0.x, y: c0.y, trail: [], steps: 0, dying: false,
+      };
+    }
+
     // ─── Draw ────────────────────────────────────────────────────────────────
     const ARROW_SIZE = 0.22;   // fraction of CELL
 
@@ -396,6 +463,35 @@
       }
       ctx.stroke();
       ctx.restore();
+
+      // Idle-hint arrows — a faint circuit drawing itself along a hidden loop
+      if (hint && hint.alpha > 0.04) {
+        ctx.save();
+        ctx.strokeStyle = '#a0c4ff';
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            const g = hintGlow(c, r);
+            if (g < 0.04) continue;
+            const cell = grid[r][c];
+            const cx   = offsetX + c * CELL + CELL / 2;
+            const cy   = offsetY + r * CELL + CELL / 2;
+            const cos  = Math.cos(cell.animAngle), sin = Math.sin(cell.animAngle);
+            const px   = -sin * sz * 0.55, py = cos * sz * 0.55;
+            ctx.globalAlpha = 0.08 + g * 0.55;
+            ctx.lineWidth   = 1.2 + g * 1.1;
+            ctx.shadowBlur  = g * 14;
+            ctx.shadowColor = `rgba(160,196,255,${g * 0.7})`;
+            ctx.beginPath();
+            ctx.moveTo(cx - cos*sz + px, cy - sin*sz + py);
+            ctx.lineTo(cx + cos*sz,      cy + sin*sz);
+            ctx.lineTo(cx - cos*sz - px, cy - sin*sz - py);
+            ctx.stroke();
+          }
+        }
+        ctx.restore();
+      }
 
       // Draw occupied arrows individually (max 4, each with glow)
       for (let r = 0; r < ROWS; r++) {
@@ -511,6 +607,29 @@
         ctx.fill();
         ctx.restore();
       }
+
+      // Idle ghost — a dim plankton walking the circuit, no notes, no grab
+      if (hint && hint.alpha > 0.03) {
+        ctx.save();
+        ctx.globalAlpha = hint.alpha;
+        ctx.lineCap = 'round';
+        for (let i = 1; i < hint.trail.length; i++) {
+          const t = i / hint.trail.length;
+          ctx.strokeStyle = `rgba(160,196,255,${t * 0.55})`;
+          ctx.lineWidth = 1.4 + t * 1.6;
+          ctx.beginPath();
+          ctx.moveTo(hint.trail[i - 1].x, hint.trail[i - 1].y);
+          ctx.lineTo(hint.trail[i].x, hint.trail[i].y);
+          ctx.stroke();
+        }
+        ctx.fillStyle = 'rgba(210,225,255,0.7)';
+        ctx.shadowBlur = 12;
+        ctx.shadowColor = 'rgba(160,196,255,0.5)';
+        ctx.beginPath();
+        ctx.arc(hint.x, hint.y, 3.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
     }
 
     // ─── Update ──────────────────────────────────────────────────────────────
@@ -532,6 +651,8 @@
 
       // Keep pool topped up with idle plankton so there's always something to tap
       while (plankton.length < 5) spawnIdlePlankton();
+
+      updateHint(now);
     }
 
     // ─── Loop ────────────────────────────────────────────────────────────────
@@ -583,6 +704,7 @@
     function setupInput() {
       canvas.addEventListener('pointerdown', e => {
         e.preventDefault();
+        noteInput();
         canvas.setPointerCapture(e.pointerId);
         const pt = canvasPt(e);
         ptrDownPos  = pt;
@@ -658,6 +780,7 @@
     }
 
     document.addEventListener('keydown', e => {
+      noteInput();
       switch (e.code) {
         case 'Space': {
           e.preventDefault();
@@ -724,6 +847,7 @@
       setupCanvas();
       initGrid();
       setupInput();
+      lastInputAt = performance.now();
       for (let i = 0; i < 5; i++) spawnIdlePlankton();
       requestAnimationFrame(loop);
     }

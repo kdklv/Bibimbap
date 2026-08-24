@@ -118,33 +118,73 @@
       spawnCreature(pts);
     }
 
+    function pointInPoly(p, pts) {
+      let inside = false;
+      for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+        const xi = pts[i].x, yi = pts[i].y, xj = pts[j].x, yj = pts[j].y;
+        if ((yi > p.y) !== (yj > p.y) &&
+            p.x < (xj - xi) * (p.y - yi) / ((yj - yi) || 1e-6) + xi)
+          inside = !inside;
+      }
+      return inside;
+    }
+
+    function randomInPoly(pts) {
+      let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+      for (const p of pts) {
+        if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+      }
+      for (let k = 0; k < 50; k++) {
+        const q = { x: minX + Math.random() * (maxX - minX), y: minY + Math.random() * (maxY - minY) };
+        if (pointInPoly(q, pts)) return q;
+      }
+      return { x: pts[0].x, y: pts[0].y };
+    }
+
+    function topCreatureAt(p) {
+      for (let i = creatures.length - 1; i >= 0; i--) {
+        const c = creatures[i];
+        if (c.dying) continue;
+        if (pointInPoly(p, c.path)) return c;
+      }
+      return null;
+    }
+
     // ─── Creature ─────────────────────────────────────────────────────────────
-    function spawnCreature(path) {
+    function spawnCreature(pts) {
       if (creatures.length >= MAX) creatures[0].dying = true;
+      const path      = pts.map(p => ({ x: p.x, y: p.y, rx: p.x, ry: p.y }));
       const n         = path.length;
       const noteEvery = Math.max(50, Math.round(n / (SPEED * 14)));
       const hue       = HUES[creatures.length % HUES.length];
-      // Three fish: lead + two at ~1/3 intervals
-      // Each fish gets its own hue offset so the school shimmers
       const school = [
-        { off: 0,    sz: 1.00, wph: Math.random() * Math.PI * 2, dh: 0,   sx: 0, sy: 0 },
-        { off: 0.36, sz: 0.74, wph: Math.random() * Math.PI * 2, dh: 22,  sx: 0, sy: 0 },
-        { off: 0.66, sz: 0.66, wph: Math.random() * Math.PI * 2, dh: -18, sx: 0, sy: 0 },
+        { off: 0,    sz: 1.00, wph: Math.random() * Math.PI * 2, dh: 0,   sx: 0, sy: 0, px: path[0].x, py: path[0].y },
+        { off: 0.36, sz: 0.74, wph: Math.random() * Math.PI * 2, dh: 22,  sx: 0, sy: 0, px: path[0].x, py: path[0].y },
+        { off: 0.66, sz: 0.66, wph: Math.random() * Math.PI * 2, dh: -18, sx: 0, sy: 0, px: path[0].x, py: path[0].y },
       ];
-      // Spawn burst: ring of dots that expand outward
       const burst = [];
       const bx = path[0].x, by = path[0].y;
       for (let i = 0; i < 14; i++) {
         const a = (i / 14) * Math.PI * 2;
         burst.push({ a, r: 4, life: 1.0 });
       }
+      const motes = Array.from({ length: 16 }, () => {
+        const q = randomInPoly(path);
+        return {
+          x: q.x, y: q.y,
+          vx: (Math.random() - 0.5) * 0.25,
+          vy: (Math.random() - 0.5) * 0.25,
+          ph: Math.random() * Math.PI * 2,
+        };
+      });
       creatures.push({
         path, n,
         phases:    path.map(() => Math.random() * Math.PI * 2),
         t:         0,
         school,
         scared:    0,
-        scareX:    0, scareY: 0,   // tap position for scatter direction
+        scareX:    0, scareY: 0,
         hue,
         opacity:   0,
         dying:     false,
@@ -152,6 +192,10 @@
         noteEvery,
         burst, bx, by,
         burstLife: 1.0,
+        motes,
+        pulse:     0,
+        cross:     0,
+        meetCool:  0,
       });
       // Spawn chord
       const midi = Audio.noteFromY(path[0].y, H, currentScale, 2);
@@ -174,22 +218,48 @@
         if (c.burstLife > 0) c.burstLife -= 0.032;
 
         if (c.scared > 0) c.scared--;
-        const spd = c.scared > 0 ? SPEED * 2.4 : SPEED;
+        const spd = c.scared > 0 ? SPEED * 2.4 : SPEED * (1 + c.pulse * 0.8);
         c.t = (c.t + spd) % c.n;
+
+        if (c.pulse > 0) c.pulse *= 0.94;
+        if (c.cross > 0) c.cross *= 0.92;
+        if (c.meetCool > 0) c.meetCool--;
+
+        for (const pt of c.path) {
+          pt.x += (pt.rx - pt.x) * 0.045;
+          pt.y += (pt.ry - pt.y) * 0.045;
+        }
+
+        const mid = c.path[0];
+        let cx = 0, cy = 0;
+        for (const pt of c.path) { cx += pt.x; cy += pt.y; }
+        cx /= c.n; cy /= c.n;
+
+        for (const m of c.motes) {
+          m.ph += 0.012;
+          m.x += m.vx + Math.sin(m.ph) * 0.12;
+          m.y += m.vy + Math.cos(m.ph * 1.1) * 0.10;
+          m.vx *= 0.96; m.vy *= 0.96;
+          if (!pointInPoly(m, c.path)) {
+            m.vx += (cx - m.x) * 0.04;
+            m.vy += (cy - m.y) * 0.04;
+          }
+        }
 
         for (const f of c.school) {
           f.wph += 0.26;
-          // Scatter: fish drift perpendicular off path when scared
           if (c.scared > 60) {
-            // Amplify scatter at start of scare
             const amp = (c.scared - 60) / 20;
             f.sx += (Math.random() - 0.5) * amp * 3;
             f.sy += (Math.random() - 0.5) * amp * 3;
           } else {
-            // Slowly return to path
             f.sx *= 0.85;
             f.sy *= 0.85;
           }
+          const idx = Math.floor((c.t + f.off * c.n) % c.n);
+          const pos = c.path[idx];
+          f.px = pos.x + f.sx;
+          f.py = pos.y + f.sy;
         }
 
         if (--c.noteTimer <= 0) {
@@ -199,6 +269,39 @@
           const pos  = c.path[idx];
           const vol  = 0.11 / Math.sqrt(creatures.length);
           playNote(Audio.noteFromY(pos.y, H, currentScale, 2), vol);
+        }
+      }
+
+      // Overlapping traces — schools meet, mix colour, share a chord
+      for (let i = 0; i < creatures.length; i++) {
+        for (let j = i + 1; j < creatures.length; j++) {
+          const a = creatures[i], b = creatures[j];
+          let meet = false, ax = 0, ay = 0, nMeet = 0;
+          for (const f of a.school) {
+            if (pointInPoly({ x: f.px, y: f.py }, b.path)) {
+              meet = true; ax += f.px; ay += f.py; nMeet++;
+              f.sx += (b.path[0].x - f.px) * 0.002;
+              f.sy += (b.path[0].y - f.py) * 0.002;
+            }
+          }
+          for (const f of b.school) {
+            if (pointInPoly({ x: f.px, y: f.py }, a.path)) {
+              meet = true; ax += f.px; ay += f.py; nMeet++;
+              f.sx += (a.path[0].x - f.px) * 0.002;
+              f.sy += (a.path[0].y - f.py) * 0.002;
+            }
+          }
+          if (!meet) continue;
+          a.cross = b.cross = 1;
+          if (a.meetCool <= 0) {
+            a.meetCool = b.meetCool = 100;
+            const mx = ax / nMeet, my = ay / nMeet;
+            const midi = Audio.noteFromY(my, H, currentScale, 2);
+            playNote(midi, 0.10, 1.6);
+            playNote(midi + 7, 0.07, 1.3);
+            a.pulse = Math.max(a.pulse, 0.7);
+            b.pulse = Math.max(b.pulse, 0.7);
+          }
         }
       }
     }
@@ -291,6 +394,25 @@
     function drawCreature(c) {
       const rp = ripplePoints(c.path, c.phases);
       const scared = c.scared;
+      const mix = (c.cross || 0);
+
+      // Interior wash — the loop is a little pond you can stir
+      ctx.save();
+      traceClosed(rp);
+      ctx.fillStyle = `hsla(${c.hue}, 50%, 42%, ${c.opacity * (0.055 + c.pulse * 0.07 + mix * 0.06)})`;
+      ctx.fill();
+      ctx.restore();
+
+      // Specks drifting in the enclosed water
+      ctx.save();
+      for (const m of c.motes) {
+        ctx.globalAlpha = c.opacity * (0.22 + c.pulse * 0.25);
+        ctx.fillStyle = `hsl(${(c.hue + mix * 40) % 360}, 80%, 78%)`;
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, 1.3 + c.pulse * 0.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
 
       // Path glow — two layers for richness
       ctx.save();
@@ -355,10 +477,49 @@
     // ─── Input ────────────────────────────────────────────────────────────────
     let drawingPtrId = null, ptrDownPos = {x:0,y:0}, downTime = 0;
     let lastTapTime = 0, lastTapPos = {x:0,y:0}, drawDist = 0;
+    let stirring = null, stirLast = null;
 
     function canvasPos(e) {
       const r = canvas.getBoundingClientRect();
       return { x: e.clientX-r.left, y: e.clientY-r.top };
+    }
+
+    function stirCreature(c, p, dx, dy) {
+      for (const pt of c.path) {
+        const d = Math.hypot(pt.x - p.x, pt.y - p.y);
+        if (d > 90) continue;
+        const w = (1 - d / 90) ** 2;
+        pt.x += dx * w * 0.55;
+        pt.y += dy * w * 0.55;
+      }
+      for (const m of c.motes) {
+        const d = Math.hypot(m.x - p.x, m.y - p.y);
+        if (d < 1 || d > 72) continue;
+        m.vx += (m.x - p.x) / d * 0.4;
+        m.vy += (m.y - p.y) / d * 0.4;
+      }
+      for (const f of c.school) {
+        f.sx += dx * 0.04;
+        f.sy += dy * 0.04;
+      }
+      c.pulse = Math.min(1, c.pulse + 0.08);
+    }
+
+    function pulseCreature(c, p) {
+      c.pulse = 1;
+      for (const f of c.school) {
+        const dx = f.px - p.x, dy = f.py - p.y;
+        const d = Math.hypot(dx, dy) || 1;
+        f.sx += (dx / d) * 8;
+        f.sy += (dy / d) * 8;
+      }
+      for (const m of c.motes) {
+        const dx = m.x - p.x, dy = m.y - p.y;
+        const d = Math.hypot(dx, dy) || 1;
+        m.vx += (dx / d) * 1.2;
+        m.vy += (dy / d) * 1.2;
+      }
+      playNote(Audio.noteFromY(p.y, H, currentScale, 2), 0.10, 0.7);
     }
 
     function scareAll(p) {
@@ -385,14 +546,34 @@
       const p = canvasPos(e);
       ptrDownPos = { ...p }; downTime = performance.now();
       if (drawingPtrId !== null) return;
-      drawingPtrId = e.pointerId; isDrawing = true;
+      drawingPtrId = e.pointerId;
+
+      const host = topCreatureAt(p);
+      if (host) {
+        stirring = host;
+        stirLast = p;
+        isDrawing = false;
+        drawing = null;
+        pulseCreature(host, p);
+        return;
+      }
+
+      isDrawing = true;
       drawing = { pts: [p] }; drawDist = 0;
       playNote(Audio.noteFromY(p.y, H, currentScale, 2), 0.07, 1.0);
     }
 
     function onMove(e) {
-      if (!isDrawing || e.pointerId !== drawingPtrId) return;
-      const p = canvasPos(e), last = drawing.pts.at(-1);
+      if (e.pointerId !== drawingPtrId) return;
+      const p = canvasPos(e);
+      if (stirring) {
+        const dx = p.x - stirLast.x, dy = p.y - stirLast.y;
+        stirCreature(stirring, p, dx, dy);
+        stirLast = p;
+        return;
+      }
+      if (!isDrawing) return;
+      const last = drawing.pts.at(-1);
       const d = Math.hypot(p.x-last.x, p.y-last.y);
       if (d >= 3) {
         drawing.pts.push(p); drawDist += d;
@@ -406,15 +587,20 @@
     function onUp(e) {
       const p = canvasPos(e);
       if (e.pointerId === drawingPtrId) {
-        isDrawing = false; drawingPtrId = null;
         const held  = performance.now() - downTime;
         const moved = Math.hypot(p.x-ptrDownPos.x, p.y-ptrDownPos.y);
-        if (held < 220 && moved < 18 && creatures.length > 0) {
-          scareAll(p);
-        } else if (drawing) {
-          finalizePath(drawing.pts);
+        if (stirring) {
+          stirring = null; stirLast = null;
+          drawingPtrId = null; isDrawing = false; drawing = null;
+        } else {
+          isDrawing = false; drawingPtrId = null;
+          if (held < 220 && moved < 18 && creatures.length > 0) {
+            scareAll(p);
+          } else if (drawing) {
+            finalizePath(drawing.pts);
+          }
+          drawing = null;
         }
-        drawing = null;
       }
       // Double-tap clears all
       const moved = Math.hypot(p.x-ptrDownPos.x, p.y-ptrDownPos.y);

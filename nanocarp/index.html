@@ -52,41 +52,204 @@
     }
 
     function fishCount() {
-      return Math.min(80, Math.max(30, Math.round(W * H / 6000)));
+      return Math.min(80, Math.max(26, Math.round(Math.PI * pond.rx * pond.ry / 4400)));
     }
 
-    function makeFish(cx, cy, spread) {
-      const angle = Math.random() * Math.PI * 2;
-      const spd   = MIN_SPEED + Math.random() * 0.8;
+    // ─── Pond — a wide irregular lake, viscous sheet on the bank ──────────────
+    const SHORE_N = 128;
+    let pond = { cx: 0, cy: 0, rx: 180, ry: 140, R: 160, disp: null, next: null, ph: null };
+    let pondT = 0;
+
+    function initPond() {
+      pond.cx = W * 0.5;
+      pond.cy = H * 0.515;
+      const pad = Math.min(W, H) * 0.055;
+      // Ellipse first (fills the screen), then blob-warp. 0.73 leaves room for coves.
+      pond.rx = Math.max(70, W * 0.5 - pad) * 0.73;
+      pond.ry = Math.max(70, H * 0.5 - pad) * 0.73;
+      pond.R  = Math.sqrt(pond.rx * pond.ry);
+      pond.disp = new Float32Array(SHORE_N);
+      pond.next = new Float32Array(SHORE_N);
+      pond.ph = [0.6, 1.8, 0.35, 2.4, 4.1];
+    }
+
+    function shoreIndex(a) {
+      let u = a / (Math.PI * 2);
+      if (u < 0) u += 1;
+      return u * SHORE_N;
+    }
+
+    function shoreSample(a) {
+      const t  = shoreIndex(a);
+      const i  = Math.floor(t) % SHORE_N;
+      const n  = (i + 1) % SHORE_N;
+      let f = t - Math.floor(t);
+      f = (1 - Math.cos(f * Math.PI)) * 0.5; // cosine — no faceted linear lerp
+      return pond.disp[i] * (1 - f) + pond.disp[n] * f;
+    }
+
+    function blobWarp(a) {
+      const t = pondT;
+      const p = pond.ph;
+      return 1
+        + 0.16 * Math.sin(a     + p[0] + 0.32 * Math.sin(t * 0.00010))
+        + 0.12 * Math.sin(a * 2 + p[1] + 0.40 * Math.sin(t * 0.00007))
+        + 0.08 * Math.sin(a * 3 + p[2] + 0.36 * Math.sin(t * 0.00013))
+        + 0.045* Math.sin(a * 5 + p[3] + 0.28 * Math.sin(t * 0.00009))
+        + 0.025* Math.sin(a * 7 + p[4]);
+    }
+
+    function ellipseR(a) {
+      const rot = 0.38; // tilt so the lake isn't screen-aligned
+      const c = Math.cos(a - rot), s = Math.sin(a - rot);
+      return (pond.rx * pond.ry) / Math.hypot(pond.ry * c, pond.rx * s);
+    }
+
+    function restRadius(a) {
+      return ellipseR(a) * blobWarp(a);
+    }
+
+    function pondRadius(a) {
+      return restRadius(a) + Math.max(0, shoreSample(a));
+    }
+
+    function inPond(x, y, pad = 0) {
+      const dx = x - pond.cx, dy = y - pond.cy;
+      return Math.hypot(dx, dy) < pondRadius(Math.atan2(dy, dx)) + pad;
+    }
+
+    // A puddle of volume on the bank — wide and flat, not a plucked peak
+    function splashShore(a, amp) {
+      const i = Math.floor(shoreIndex(a)) % SHORE_N;
+      for (let k = -6; k <= 6; k++) {
+        const j = (i + k + SHORE_N) % SHORE_N;
+        const w = Math.exp(-0.5 * (k / 2.6) * (k / 2.6));
+        pond.disp[j] += amp * w;
+      }
+    }
+
+    function pokeShore(x, y, amp) {
+      const a = Math.atan2(y - pond.cy, x - pond.cx);
+      splashShore(a, amp);
+      const nx = Math.cos(a), ny = Math.sin(a);
+      for (const f of fish) {
+        const fa = Math.atan2(f.y - pond.cy, f.x - pond.cx);
+        let da = fa - a;
+        da = Math.atan2(Math.sin(da), Math.cos(da));
+        if (Math.abs(da) > 0.55) continue;
+        const rest = restRadius(fa);
+        const d = Math.hypot(f.x - pond.cx, f.y - pond.cy);
+        if (rest - d > 70) continue;
+        f.vx -= nx * 1.15;
+        f.vy -= ny * 1.15;
+        f.dartFrames = 12;
+        f.glow = 1;
+      }
+    }
+
+    function updatePond() {
+      pondT = performance.now();
+      const d = pond.disp, n = pond.next;
+      const max = Math.min(34, pond.R * 0.09);
+      // Viscous sheet: taller water flows into neighbors and thins. No inertia, no snap.
+      for (let i = 0; i < SHORE_N; i++) {
+        const L = d[(i - 1 + SHORE_N) % SHORE_N];
+        const R = d[(i + 1) % SHORE_N];
+        let h = d[i] + (L + R - 2 * d[i]) * 0.24;
+        if (h > 0) h *= 0.958; // drain back into the pond
+        else h = 0;
+        if (h > max) h = max;
+        n[i] = h;
+      }
+      pond.disp = n;
+      pond.next = d;
+    }
+
+    function containFish(f) {
+      const dx = f.x - pond.cx, dy = f.y - pond.cy;
+      const d  = Math.hypot(dx, dy) || 0.001;
+      const a  = Math.atan2(dy, dx);
+      const R  = restRadius(a) - f.size * 1.6;
+      const nx = dx / d, ny = dy / d;
+      const band = Math.max(36, R * 0.09);
+      if (d > R) {
+        f.x = pond.cx + nx * R;
+        f.y = pond.cy + ny * R;
+        const vn = f.vx * nx + f.vy * ny;
+        if (vn > 0) { f.vx -= vn * 1.25 * nx; f.vy -= vn * 1.25 * ny; }
+      } else if (d > R - band) {
+        const t = (d - (R - band)) / band;
+        f.vx -= nx * t * 0.14;
+        f.vy -= ny * t * 0.14;
+      }
+    }
+
+    // Swell on the bank carries nearby fish with it, then the wall ushers them back
+    function shoreCarry(f) {
+      const dx = f.x - pond.cx, dy = f.y - pond.cy;
+      const d  = Math.hypot(dx, dy) || 1;
+      const a  = Math.atan2(dy, dx);
+      const wash = shoreSample(a);
+      if (wash < 0.35) return;
+      const rest = restRadius(a);
+      const shallow = 1 - Math.min(1, Math.max(0, (rest - d) / 60));
+      if (shallow <= 0) return;
+      const carry = wash * 0.028 * shallow * shallow;
+      f.vx += (dx / d) * carry;
+      f.vy += (dy / d) * carry;
+    }
+
+    function traceRadius(fn) {
+      const N = 192;
+      ctx.beginPath();
+      for (let i = 0; i <= N; i++) {
+        const a = (i / N) * Math.PI * 2;
+        const r = fn(a);
+        const x = pond.cx + Math.cos(a) * r;
+        const y = pond.cy + Math.sin(a) * r;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+    }
+    function tracePond() { traceRadius(pondRadius); }
+    function traceRestPond() { traceRadius(restRadius); }
+
+    function makeFish() {
+      const heading = Math.random() * Math.PI * 2;
+      const a = Math.random() * Math.PI * 2;
+      const r = Math.random() * restRadius(a) * 0.78;
+      const spd = MIN_SPEED + Math.random() * 0.8;
       return {
-        x: Math.max(12, Math.min(W - 12, cx + (Math.random() - 0.5) * spread)),
-        y: Math.max(12, Math.min(H - 12, cy + (Math.random() - 0.5) * spread)),
-        vx: Math.cos(angle) * spd,
-        vy: Math.sin(angle) * spd,
-        angle,
+        x: pond.cx + Math.cos(a) * r,
+        y: pond.cy + Math.sin(a) * r,
+        vx: Math.cos(heading) * spd,
+        vy: Math.sin(heading) * spd,
+        angle: heading,
         size: 6 + Math.random() * 3,   // maps to Tracy's sz via size/9
         hue:  170 + Math.random() * 40,
         wph:  Math.random() * Math.PI * 2,  // wag phase — body wiggle
         trail: [],
         dartFrames: 0,
+        glow: 0,
       };
     }
 
     function initFish() {
-      fish = Array.from({ length: fishCount() }, () =>
-        makeFish(W * 0.5, H * 0.5, Math.min(W, H) * 0.5)
-      );
+      fish = Array.from({ length: fishCount() }, () => makeFish());
     }
 
     function scatterFish() {
       for (const f of fish) {
-        f.x = W * 0.1 + Math.random() * W * 0.8;
-        f.y = H * 0.1 + Math.random() * H * 0.8;
         const a = Math.random() * Math.PI * 2;
+        const r = Math.random() * restRadius(a) * 0.75;
+        f.x = pond.cx + Math.cos(a) * r;
+        f.y = pond.cy + Math.sin(a) * r;
+        const h = Math.random() * Math.PI * 2;
         const s = MIN_SPEED + Math.random() * 0.8;
-        f.vx = Math.cos(a) * s;
-        f.vy = Math.sin(a) * s;
+        f.vx = Math.cos(h) * s;
+        f.vy = Math.sin(h) * s;
         f.dartFrames = 0;
+        f.glow = 0;
         f.trail = [];
       }
     }
@@ -206,12 +369,17 @@
       let fx = 0, fy = 0;
       if (sn) { fx += (sx/sn) * 1.5;           fy += (sy/sn) * 1.5; }
       if (an) { fx += (ax/an - f.vx) * 0.8;    fy += (ay/an - f.vy) * 0.8; }
-      if (cn) { fx += (cx/cn - f.x)  * 0.0005; fy += (cy/cn - f.y)  * 0.0005; }
-      const m = 40;
-      if (f.x < m)   fx += (m - f.x)   * 0.04;
-      if (f.x > W-m) fx -= (f.x-(W-m)) * 0.04;
-      if (f.y < m)   fy += (m - f.y)   * 0.04;
-      if (f.y > H-m) fy -= (f.y-(H-m)) * 0.04;
+      if (cn) { fx += (cx/cn - f.x)  * 0.0007; fy += (cy/cn - f.y)  * 0.0007; }
+      // Stay in the open water of a large lake, not glued to the bank
+      const pdx = pond.cx - f.x, pdy = pond.cy - f.y;
+      const pd  = Math.hypot(pdx, pdy) || 1;
+      const pa  = Math.atan2(-pdy, -pdx);
+      const edge = pd / restRadius(pa);
+      if (edge > 0.62) {
+        const t = (edge - 0.62) / 0.38;
+        fx += (pdx / pd) * t * 0.35;
+        fy += (pdy / pd) * t * 0.35;
+      }
       return { fx, fy };
     }
 
@@ -223,9 +391,14 @@
         f.vx += fx * 0.06;
         f.vy += fy * 0.06;
         if (f.dartFrames > 0) f.dartFrames--;
+        if (f.glow > 0) {
+          f.glow *= 0.9;
+          if (f.glow < 0.03) f.glow = 0;
+        }
 
         let spd = Math.hypot(f.vx, f.vy);
-        if (spd > MAX_SPEED)               { f.vx *= MAX_SPEED/spd; f.vy *= MAX_SPEED/spd; }
+        const cap = f.dartFrames > 0 ? MAX_SPEED * 1.9 : MAX_SPEED;
+        if (spd > cap)                         { f.vx *= cap/spd; f.vy *= cap/spd; }
         if (spd < MIN_SPEED && spd > 0.001){ f.vx *= MIN_SPEED/spd; f.vy *= MIN_SPEED/spd; }
         if (spd < 0.001)                   { f.vx = MIN_SPEED; f.vy = 0; }
 
@@ -235,31 +408,81 @@
         f.trail.push({ x: f.x, y: f.y });
         if (f.trail.length > 14) f.trail.shift();
 
-        const r = f.size;
-        if (f.x < r)   { f.x = r;   f.vx =  Math.abs(f.vx) * 0.8; }
-        if (f.x > W-r) { f.x = W-r; f.vx = -Math.abs(f.vx) * 0.8; }
-        if (f.y < r)   { f.y = r;   f.vy =  Math.abs(f.vy) * 0.8; }
-        if (f.y > H-r) { f.y = H-r; f.vy = -Math.abs(f.vy) * 0.8; }
-
+        shoreCarry(f);
+        containFish(f);
         f.angle = Math.atan2(f.vy, f.vx);
+      }
+    }
+
+    // Where the crest kisses the bank, leave a sheet of water. The wet patch
+    // walks with the wavefront instead of plucking one point like a string.
+    function addWash(s, amp) {
+      for (let k = -3; k <= 3; k++) {
+        const j = (s + k + SHORE_N) % SHORE_N;
+        const w = Math.exp(-0.5 * (k / 1.7) * (k / 1.7));
+        pond.disp[j] += amp * w;
+      }
+    }
+
+    function washFromRipple(rpl, life) {
+      const d0 = Math.hypot(rpl.x - pond.cx, rpl.y - pond.cy);
+      const near = Math.min(1, d0 / (pond.R * 0.88));
+      const band = 12 + rpl.r * 0.025;
+      const push = rpl.speed * 5.8 * (0.45 + 0.55 * near) * (0.55 + 0.45 * life);
+      for (let s = 0; s < SHORE_N; s++) {
+        const a  = (s / SHORE_N) * Math.PI * 2;
+        const rr = restRadius(a);
+        const sx = pond.cx + Math.cos(a) * rr;
+        const sy = pond.cy + Math.sin(a) * rr;
+        const dist = Math.hypot(sx - rpl.x, sy - rpl.y) || 1;
+        if (rpl.r < dist - band || rpl.r > dist + 3) continue;
+        const head = Math.max(0,
+          (Math.cos(a) * (sx - rpl.x) + Math.sin(a) * (sy - rpl.y)) / dist
+        );
+        if (head < 0.45) continue;
+        // Keep the tongue local to the facing bank — don't snake around the lake
+        if (d0 > pond.R * 0.18) {
+          let da = a - Math.atan2(rpl.y - pond.cy, rpl.x - pond.cx);
+          da = Math.atan2(Math.sin(da), Math.cos(da));
+          if (Math.abs(da) > 1.05) continue;
+        }
+        const crest = 1 - Math.abs(rpl.r - dist) / band;
+        addWash(s, crest * head * push * 0.3);
       }
     }
 
     function updateRipples() {
       for (let i = ripples.length - 1; i >= 0; i--) {
         const rpl = ripples[i];
+        const life = Math.max(0, 1 - rpl.r / rpl.maxR);
+        rpl.speed = rpl.baseSpeed * (0.68 + 0.32 * life);
         rpl.r += rpl.speed;
-        rpl.opacity = Math.max(0, 1 - rpl.r / rpl.maxR);
+        // Hold presence across the pond, then ease out — not a snap after the first bank
+        let fade = Math.pow(life, 1.5);
+        if (rpl.r > rpl.near + pond.R * 0.28) {
+          const after = (rpl.r - rpl.near - pond.R * 0.28) / Math.max(50, pond.R * 0.4);
+          fade *= Math.max(0, 1 - after * 0.85);
+        }
+        rpl.opacity = fade;
+        if (fade < 0.03) { ripples.splice(i, 1); continue; }
+        washFromRipple(rpl, life);
 
         for (const f of fish) {
-          if (rpl.triggered.has(f)) continue;
           const d = Math.hypot(f.x - rpl.x, f.y - rpl.y);
-          if (d > rpl.r - 8 && d < rpl.r + 8) {
+          const band = 18 + rpl.r * 0.04;
+          const w = 1 - Math.abs(d - rpl.r) / band;
+          if (w <= 0) continue;
+          const a = Math.atan2(f.y - rpl.y, f.x - rpl.x);
+          const swell = 0.22 * w * w * (0.45 + 0.55 * life);
+          f.vx += Math.cos(a) * swell;
+          f.vy += Math.sin(a) * swell;
+          if (!rpl.triggered.has(f) && w > 0.28) {
             rpl.triggered.add(f);
-            const a = Math.atan2(f.y - rpl.y, f.x - rpl.x);
-            f.vx += Math.cos(a) * 5;
-            f.vy += Math.sin(a) * 5;
-            f.dartFrames = 20;
+            const burst = 2.1 + 1.6 * w * life;
+            f.vx += Math.cos(a) * burst;
+            f.vy += Math.sin(a) * burst;
+            f.dartFrames = 20 + (w * 14) | 0;
+            f.glow = 1;
             playFishNote(f);
           }
         }
@@ -273,36 +496,46 @@
     function drawFish(f) {
       const h      = f.hue;
       const scared = f.dartFrames > 0;
-      const sz     = f.size / 9;                          // Tracy uses sz≈1.0 with 9px ellipse
-      const breath = 1 + 0.07 * Math.sin(f.wph * 0.18);  // subtle size pulse
-      const s      = sz * breath;
+      const glow   = f.glow || 0;
+      const sz     = f.size / 9;
+      const breath = 1 + 0.07 * Math.sin(f.wph * 0.18);
+      const s      = sz * breath * (1 + glow * 0.12);
 
-      // Comet tail — world-space dots fading back through trail
-      // Skip shadowBlur here (up to 80 fish × 14 dots = ~1000 ops); glow on body only
       const TRAIL = f.trail.length;
       for (let k = 0; k < TRAIL; k++) {
         const frac = (k + 1) / TRAIL;
-        ctx.globalAlpha = frac * 0.52;
-        ctx.fillStyle   = `hsl(${h}, 85%, 70%)`;
+        ctx.globalAlpha = frac * (0.42 + glow * 0.45);
+        ctx.fillStyle   = glow > 0.04
+          ? `hsla(${h + 8}, 90%, ${72 + glow * 18}%, 1)`
+          : `hsl(${h}, 85%, 70%)`;
         ctx.beginPath();
-        ctx.arc(f.trail[k].x, f.trail[k].y, s * frac * 2.8, 0, Math.PI * 2);
+        ctx.arc(f.trail[k].x, f.trail[k].y, s * frac * (2.8 + glow * 1.6), 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.globalAlpha = 1;
 
-      // Body — same as Tracy: scaled local space, shadowBlur glow, sheen, forked tail
       ctx.save();
       ctx.translate(f.x, f.y);
       ctx.rotate(f.angle + Math.sin(f.wph) * (scared ? 0.42 : 0.14));
       ctx.scale(s, s);
-      ctx.shadowBlur  = 10;
-      ctx.shadowColor = `hsl(${h}, 95%, 75%)`;
-      ctx.fillStyle   = `hsl(${h}, 80%, 78%)`;
+
+      if (glow > 0.04) {
+        ctx.globalAlpha = glow * 0.5;
+        ctx.fillStyle = `hsla(${h + 12}, 95%, 88%, 1)`;
+        ctx.shadowBlur = 22;
+        ctx.shadowColor = `hsla(${h + 8}, 100%, 78%, ${glow})`;
+        ctx.beginPath(); ctx.ellipse(0, 0, 16, 8, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      ctx.shadowBlur  = 10 + glow * 16;
+      ctx.shadowColor = `hsl(${h}, 95%, ${75 + glow * 12}%)`;
+      ctx.fillStyle   = `hsl(${h}, ${80 + glow * 12}%, ${78 + glow * 14}%)`;
       ctx.beginPath(); ctx.ellipse(0, 0, 9, 4, 0, 0, Math.PI * 2); ctx.fill();
       ctx.shadowBlur = 0;
-      ctx.fillStyle  = `hsla(${h}, 90%, 95%, 0.35)`;
+      ctx.fillStyle  = `hsla(${h}, 90%, 95%, ${0.35 + glow * 0.4})`;
       ctx.beginPath(); ctx.ellipse(1, -1, 4, 1.4, -0.3, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = `hsl(${h}, 75%, 68%)`;
+      ctx.strokeStyle = `hsl(${h}, 75%, ${68 + glow * 20}%)`;
       ctx.lineWidth = 2.2; ctx.lineCap = 'round';
       ctx.beginPath();
       ctx.moveTo(-7, 0); ctx.lineTo(-15, -6);
@@ -312,33 +545,92 @@
     }
 
     function drawRipple(rpl) {
+      const fade = rpl.opacity;
+      if (fade < 0.03) return;
+      const n = 64;
       ctx.save();
-      for (let k = -1; k <= 1; k++) {
-        const r = rpl.r + k * 6;
-        if (r <= 0) continue;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      // Rings are clipped to the pond — one shoreline, no inner ghost edge
+      function strokeArc(scale, phase, wobbleAmt, k, alpha, width) {
         ctx.beginPath();
-        ctx.arc(rpl.x, rpl.y, r, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(160, 210, 230, ${rpl.opacity * (0.65 - Math.abs(k) * 0.22)})`;
-        ctx.lineWidth = 1.4;
+        for (let i = 0; i <= n; i++) {
+          const a = (i / n) * Math.PI * 2 + phase;
+          const wobble = 1 + rpl.wobble * wobbleAmt * Math.sin(a * k + rpl.seed);
+          const rr = rpl.r * scale * wobble;
+          const x = rpl.x + Math.cos(a) * rr;
+          const y = rpl.y + Math.sin(a) * rr;
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = `rgba(160, 210, 230, ${alpha})`;
+        ctx.lineWidth = width;
         ctx.stroke();
       }
+
+      strokeArc(1, 0, 1, rpl.k1, 0.7 * fade, 0.9 + 1.7 * fade);
+      if (rpl.r > 10) strokeArc(0.78, 0.07, 1.3, rpl.k2, 0.24 * fade, 0.75 + 1.1 * fade);
       ctx.restore();
     }
 
-    function draw() {
-      ctx.fillStyle = 'rgba(8, 12, 20, 0.25)';
-      ctx.fillRect(0, 0, W, H);
-      for (const rpl of ripples) drawRipple(rpl);
-      for (const f of fish)      drawFish(f);
+    function drawShore() {
+      tracePond();
+      ctx.strokeStyle = 'rgba(160, 210, 230, 0.34)';
+      ctx.lineWidth = 1.5;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.stroke();
     }
 
-    function loop() { updateFish(); updateRipples(); draw(); requestAnimationFrame(loop); }
+    function draw() {
+      ctx.fillStyle = 'rgba(8, 12, 20, 0.28)';
+      ctx.fillRect(0, 0, W, H);
+
+      tracePond();
+      ctx.fillStyle = 'rgba(12, 30, 40, 0.5)';
+      ctx.fill();
+
+      ctx.save();
+      tracePond();
+      ctx.clip();
+      for (const rpl of ripples) drawRipple(rpl);
+      for (const f of fish)      drawFish(f);
+      ctx.restore();
+
+      drawShore();
+    }
+
+    function loop() { updatePond(); updateFish(); updateRipples(); draw(); requestAnimationFrame(loop); }
 
     // ─── Input ────────────────────────────────────────────────────────────────
     function spawnRipple(x, y) {
+      if (!inPond(x, y, 8)) {
+        pokeShore(x, y, 4.5);
+        return;
+      }
       if (ripples.length >= MAX_RIPPLES) ripples.shift();
-      const maxR = Math.max(W, H) * 0.7;
-      ripples.push({ x, y, r: 0, maxR, speed: 2.5, opacity: 1.0, triggered: new Set() });
+      let nearD = Infinity, farD = 0;
+      for (let s = 0; s < SHORE_N; s += 2) {
+        const a  = (s / SHORE_N) * Math.PI * 2;
+        const rr = restRadius(a);
+        const dist = Math.hypot(pond.cx + Math.cos(a) * rr - x, pond.cy + Math.sin(a) * rr - y);
+        if (dist < nearD) nearD = dist;
+        if (dist > farD) farD = dist;
+      }
+      ripples.push({
+        x, y,
+        r: 4,
+        maxR: Math.min(farD * 0.94, nearD + pond.R * 0.72),
+        near: nearD,
+        baseSpeed: 2.05 + Math.random() * 0.35,
+        speed: 2,
+        opacity: 1,
+        triggered: new Set(),
+        seed: Math.random() * Math.PI * 2,
+        wobble: 0.03 + Math.random() * 0.025,
+        k1: 2 + (Math.random() * 2 | 0),
+        k2: 5 + (Math.random() * 3 | 0),
+      });
       playRippleNote(y);
     }
 
@@ -375,8 +667,9 @@
       const rect = canvas.getBoundingClientRect();
       const ox = rect.width / W, oy = rect.height / H;
       setupCanvas();
+      initPond();
       initBoidGrid();
-      for (const f   of fish)    { f.x   *= ox; f.y   *= oy; }
+      for (const f   of fish)    { f.x   *= ox; f.y   *= oy; containFish(f); }
       for (const rpl of ripples) { rpl.x *= ox; rpl.y *= oy; }
     }
 
@@ -396,6 +689,7 @@
       setTimeout(() => beginEl.remove(), 700);
 
       setupCanvas();
+      initPond();
       initFish();
       initBoidGrid();
       setupInput();

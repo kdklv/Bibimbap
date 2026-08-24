@@ -20,8 +20,8 @@
       flex-direction: column;
       gap: 14px;
       width:  min(640px, calc(100vw - 32px));
-      height: min(440px, calc(100vh - 48px));
-      height: min(440px, calc(100dvh - 48px));
+      height: min(580px, calc(100vh - 48px));
+      height: min(580px, calc(100dvh - 48px));
     }
 
     h1 {
@@ -36,8 +36,8 @@
 
     .bento {
       display: grid;
-      grid-template-columns: 2fr 1fr 2fr;
-      grid-template-rows: 1fr 1fr;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr 1fr 1fr;
       gap: 5px;
       flex: 1;
       min-height: 0;
@@ -55,10 +55,12 @@
     a.card:hover { border-color: rgba(160,196,255,0.22); }
     a.card canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 
-    .card-luminaria { grid-column: 1 / 3; grid-row: 1; }
-    .card-hanenbow  { grid-column: 3;     grid-row: 1; }
-    .card-tracy     { grid-column: 1;     grid-row: 2; }
-    .card-nanocarp  { grid-column: 2 / 4; grid-row: 2; }
+    .card-luminaria { grid-column: 1; grid-row: 1; }
+    .card-hanenbow  { grid-column: 2; grid-row: 1; }
+    .card-tracy     { grid-column: 1; grid-row: 2; }
+    .card-slosh     { grid-column: 2; grid-row: 2; }
+    .card-nanocarp  { grid-column: 1; grid-row: 3; }
+    .card-soon      { grid-column: 2; grid-row: 3; }
 
     .card-label {
       position: absolute;
@@ -93,9 +95,17 @@
         <canvas id="cv-t"></canvas>
         <span class="card-label">tracy</span>
       </a>
+      <a class="card card-slosh" href="slosh/">
+        <canvas id="cv-s"></canvas>
+        <span class="card-label">slosh</span>
+      </a>
       <a class="card card-nanocarp" href="nanocarp/">
         <canvas id="cv-n"></canvas>
         <span class="card-label">nanocarp</span>
+      </a>
+      <a class="card card-soon soon" href="#" tabindex="-1" aria-disabled="true">
+        <canvas id="cv-x"></canvas>
+        <span class="card-label">soon</span>
       </a>
     </div>
   </div>
@@ -121,16 +131,21 @@ function initCanvas(id) {
 // toward the middle of each shared edge (like real stone masonry).
 //
 // Bows are inward (concave) per side. Matching pairs:
-//   luminaria-right(10) ↔ hanenbow-left(10)
-//   luminaria-bottom(8) ↔ tracy-top(8)
-//   hanenbow-bottom(6)  ↔ nanocarp-top(6)
-//   tracy-right(6)      ↔ nanocarp-left(6)
+//   luminaria-right(8)  ↔ hanenbow-left(8)
+//   luminaria-bottom(6) ↔ tracy-top(6)
+//   hanenbow-bottom(6)  ↔ slosh-top(6)
+//   tracy-right(8)      ↔ slosh-left(8)
+//   tracy-bottom(6)     ↔ nanocarp-top(6)
+//   slosh-bottom(6)     ↔ soon-top(6)
+//   nanocarp-right(8)   ↔ soon-left(8)
 
 const STONE_DEFS = {
-  'card-luminaria': { corners: {tl:24, tr:7,  br:7,  bl:12}, bows: {top:3, right:10, bottom:8, left:3}  },
-  'card-hanenbow':  { corners: {tl:7,  tr:24, br:18, bl:6 }, bows: {top:3, right:3,  bottom:6, left:10} },
-  'card-tracy':     { corners: {tl:12, tr:6,  br:9,  bl:24}, bows: {top:8, right:6,  bottom:3, left:3}  },
-  'card-nanocarp':  { corners: {tl:6,  tr:18, br:24, bl:12}, bows: {top:6, right:3,  bottom:3, left:6}  },
+  'card-luminaria': { corners: {tl:22, tr:8,  br:8,  bl:10}, bows: {top:3, right:8,  bottom:6, left:3}  },
+  'card-hanenbow':  { corners: {tl:8,  tr:22, br:10, bl:8 }, bows: {top:3, right:3,  bottom:6, left:8}  },
+  'card-tracy':     { corners: {tl:10, tr:8,  br:8,  bl:22}, bows: {top:6, right:8,  bottom:6, left:3}  },
+  'card-slosh':     { corners: {tl:8,  tr:22, br:10, bl:8 }, bows: {top:6, right:3,  bottom:6, left:8}  },
+  'card-nanocarp':  { corners: {tl:10, tr:8,  br:22, bl:10}, bows: {top:6, right:8,  bottom:3, left:3}  },
+  'card-soon':      { corners: {tl:8,  tr:22, br:22, bl:8 }, bows: {top:6, right:3,  bottom:3, left:8}  },
 };
 
 function stonePath(W, H, {tl, tr, br, bl}, {top, right, bottom, left}) {
@@ -180,11 +195,15 @@ window.addEventListener('load', () => requestAnimationFrame(() => {
   const L  = initCanvas('cv-l');
   const Ha = initCanvas('cv-h');
   const T  = initCanvas('cv-t');
+  const S  = initCanvas('cv-s');
   const N  = initCanvas('cv-n');
+  const X  = initCanvas('cv-x');
   animLuminaria(L.ctx,  L.W,  L.H);
   animHanenbow (Ha.ctx, Ha.W, Ha.H);
   animTracy    (T.ctx,  T.W,  T.H);
+  animSlosh    (S.ctx,  S.W,  S.H);
   animNanocarp (N.ctx,  N.W,  N.H);
+  animSoon     (X.ctx,  X.W,  X.H);
 }));
 
 // ── Luminaria – arrow grid + drifting plankton ───────────────────────────────
@@ -458,45 +477,164 @@ function animTracy(ctx, W, H) {
   (function loop() { draw(); requestAnimationFrame(loop); })();
 }
 
-// ── Nanocarp – fish school ────────────────────────────────────────────────────
-function animNanocarp(ctx, W, H) {
-  const fish = Array.from({length: 16}, (_, i) => ({
-    x:    W/2 + (Math.random()-0.5)*W*0.7,
-    y:    H/2 + (Math.random()-0.5)*H*0.7,
-    a:    Math.random()*Math.PI*2,
-    spd:  0.35 + Math.random()*0.25,
-    turn: (Math.random()-0.5)*0.018,
-    sz:   2.8 + Math.random()*2.2,
-    hue:  195 + Math.random()*30,
-    phase: Math.random()*Math.PI*2,
+// ── Slosh – wobbly membrane + drifting nuclei ────────────────────────────────
+function animSlosh(ctx, W, H) {
+  const cx = W * 0.5, cy = H * 0.52;
+  const baseR = Math.min(W, H) * 0.34;
+  const hues = [30, 90, 170, 240, 300];
+  const nuclei = hues.map((hue, i) => ({
+    hue,
+    a: (i / hues.length) * Math.PI * 2,
+    r: 2.2 + (4 - i) * 0.35,
+    spd: 0.007 + i * 0.0012,
+    orbit: baseR * (0.22 + i * 0.08),
   }));
+  let t = 0;
 
-  let frame = 0;
+  function blobPoint(a, wobble) {
+    const r = baseR + Math.sin(a * 3 + t * 0.7) * 3 + Math.cos(a * 5 - t * 0.5) * 1.8 + wobble;
+    return { x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r };
+  }
 
   function draw() {
-    ctx.fillStyle = 'rgba(8,12,20,0.2)';
+    ctx.fillStyle = 'rgba(8,12,20,0.22)';
     ctx.fillRect(0, 0, W, H);
 
-    frame++;
+    t += 0.018;
+    const n = 36;
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      const p = blobPoint(a, Math.sin(t + i * 0.35) * 1.5);
+      if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(160,196,255,0.06)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(232,234,240,0.42)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    for (const nuc of nuclei) {
+      nuc.a += nuc.spd;
+      const px = cx + Math.cos(nuc.a) * nuc.orbit;
+      const py = cy + Math.sin(nuc.a * 1.15) * nuc.orbit * 0.82 + Math.sin(t * 2 + nuc.hue) * 2;
+      ctx.save();
+      ctx.shadowBlur = nuc.r > 2.8 ? 10 : 6;
+      ctx.shadowColor = `hsla(${nuc.hue},85%,65%,0.55)`;
+      ctx.fillStyle = `hsla(${nuc.hue},85%,68%,0.82)`;
+      ctx.beginPath();
+      ctx.arc(px, py, nuc.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  (function loop() { draw(); requestAnimationFrame(loop); })();
+}
+
+// ── Soon – idle placeholder pulse ────────────────────────────────────────────
+function animSoon(ctx, W, H) {
+  let t = 0;
+  function draw() {
+    ctx.fillStyle = 'rgba(8,12,20,0.35)';
+    ctx.fillRect(0, 0, W, H);
+    t += 0.02;
+    const pulse = 0.5 + Math.sin(t) * 0.5;
+    const cx = W * 0.5, cy = H * 0.5;
+    ctx.strokeStyle = `rgba(160,196,255,${0.04 + pulse * 0.06})`;
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 3; i++) {
+      const r = 12 + i * 14 + pulse * 6;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+  (function loop() { draw(); requestAnimationFrame(loop); })();
+}
+
+// ── Nanocarp – fish school ────────────────────────────────────────────────────
+function animNanocarp(ctx, W, H) {
+  const cx = W * 0.5, cy = H * 0.52;
+  const rx = W * 0.42, ry = H * 0.38;
+  function lakeR(a, t) {
+    const rot = 0.4;
+    const c = Math.cos(a - rot), s = Math.sin(a - rot);
+    const ell = (rx * ry) / Math.hypot(ry * c, rx * s);
+    return ell * (1
+      + 0.14 * Math.sin(a + t * 0.35)
+      + 0.10 * Math.sin(a * 2 - t * 0.22)
+      + 0.06 * Math.sin(a * 3 + t * 0.18));
+  }
+  function inLake(x, y, t) {
+    const dx = x - cx, dy = y - cy;
+    return Math.hypot(dx, dy) < lakeR(Math.atan2(dy, dx), t) - 3;
+  }
+
+  const fish = Array.from({length: 14}, () => {
+    const a = Math.random() * Math.PI * 2;
+    const r = Math.random() * Math.min(rx, ry) * 0.55;
+    return {
+      x:    cx + Math.cos(a) * r,
+      y:    cy + Math.sin(a) * r,
+      a:    Math.random() * Math.PI * 2,
+      spd:  0.32 + Math.random() * 0.22,
+      turn: (Math.random() - 0.5) * 0.016,
+      sz:   2.8 + Math.random() * 2.0,
+      hue:  195 + Math.random() * 30,
+      phase: Math.random() * Math.PI * 2,
+    };
+  });
+
+  let t = 0;
+
+  function draw() {
+    ctx.fillStyle = 'rgba(8,12,20,0.22)';
+    ctx.fillRect(0, 0, W, H);
+    t += 0.018;
+
+    ctx.beginPath();
+    const n = 40;
+    for (let i = 0; i <= n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      const r = lakeR(a, t);
+      const x = cx + Math.cos(a) * r;
+      const y = cy + Math.sin(a) * r;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(12, 28, 38, 0.45)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(160, 210, 230, 0.28)';
+    ctx.lineWidth = 1.1;
+    ctx.stroke();
+
+    ctx.save();
+    ctx.clip();
     for (const f of fish) {
-      f.a += f.turn + Math.sin(frame*0.007 + f.phase)*0.008;
-      f.x += Math.cos(f.a)*f.spd;
-      f.y += Math.sin(f.a)*f.spd;
-      if (f.x < -8) f.x = W+8;
-      if (f.x > W+8) f.x = -8;
-      if (f.y < -8) f.y = H+8;
-      if (f.y > H+8) f.y = -8;
+      f.a += f.turn + Math.sin(t * 0.4 + f.phase) * 0.01;
+      f.x += Math.cos(f.a) * f.spd;
+      f.y += Math.sin(f.a) * f.spd;
+      if (!inLake(f.x, f.y, t)) {
+        const ang = Math.atan2(f.y - cy, f.x - cx);
+        f.a = ang + Math.PI + (Math.random() - 0.5) * 0.6;
+        const rr = lakeR(ang, t) * 0.82;
+        f.x = cx + Math.cos(ang) * rr;
+        f.y = cy + Math.sin(ang) * rr;
+      }
 
       ctx.save();
       ctx.translate(f.x, f.y); ctx.rotate(f.a);
-      ctx.fillStyle = `hsla(${f.hue},55%,68%,0.65)`;
-      ctx.beginPath(); ctx.ellipse(0, 0, f.sz, f.sz*0.42, 0, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = `hsla(${f.hue},55%,68%,0.7)`;
+      ctx.beginPath(); ctx.ellipse(0, 0, f.sz, f.sz * 0.42, 0, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = `hsla(${f.hue},55%,68%,0.35)`;
       ctx.beginPath();
-      ctx.moveTo(-f.sz, 0); ctx.lineTo(-f.sz*1.8, -f.sz*0.5); ctx.lineTo(-f.sz*1.8, f.sz*0.5);
+      ctx.moveTo(-f.sz, 0); ctx.lineTo(-f.sz * 1.8, -f.sz * 0.5); ctx.lineTo(-f.sz * 1.8, f.sz * 0.5);
       ctx.closePath(); ctx.fill();
       ctx.restore();
     }
+    ctx.restore();
   }
 
   (function loop() { draw(); requestAnimationFrame(loop); })();

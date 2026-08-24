@@ -89,8 +89,8 @@
     third.connect(thirdG); thirdG.connect(env);
 
     env.gain.setValueAtTime(0.0001, now);
-    env.gain.linearRampToValueAtTime(vol, now + 0.012);
-    env.gain.exponentialRampToValueAtTime(vol * 0.38, now + 0.10);
+    env.gain.linearRampToValueAtTime(vol, now + 0.045);
+    env.gain.exponentialRampToValueAtTime(vol * 0.42, now + 0.22);
     env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
 
     osc.connect(env); env.connect(masterGain); env.connect(reverbNode);
@@ -216,13 +216,16 @@
 
   let nuclei = [];
   let wallFlashes = []; // { x, y, hue, life, maxLife }
+  let gustRipples = []; // expanding rings from a poke
+  let edgeWaves = [];   // traveling shimmer along the membrane
+  let clock = 0;
 
   function initNuclei() {
     nuclei = NUCLEUS_DEFS.map((def, i) => ({
       x: W/2 + (Math.random()-0.5)*60,
       y: H/2 + (Math.random()-0.5)*60,
-      vx: (Math.random()-0.5)*3,
-      vy: (Math.random()-0.5)*3,
+      vx: (Math.random()-0.5)*1.2,
+      vy: (Math.random()-0.5)*1.2,
       r: def.r,
       hue: def.hue,
       midi: PALETTES[currentPalette][i],
@@ -233,12 +236,14 @@
       wallDist: Infinity,
     }));
     wallFlashes = [];
+    gustRipples = [];
+    edgeWaves = [];
   }
 
   function scatterNuclei() {
     for(const nuc of nuclei) {
       const a = Math.random()*Math.PI*2;
-      const spd = 3 + Math.random()*4;
+      const spd = 1.4 + Math.random()*1.6;
       nuc.vx = Math.cos(a)*spd;
       nuc.vy = Math.sin(a)*spd;
       nuc.trail = [];
@@ -271,23 +276,22 @@
       }
     }
 
-    for(const nuc of nuclei) {
-      // Slight gravity — snow-globe feel
-      nuc.vy += 0.045;
-
-      nuc.vx += (Math.random()-0.5)*0.15;
-      nuc.vy += (Math.random()-0.5)*0.15;
+    for(let ni = 0; ni < nuclei.length; ni++) {
+      const nuc = nuclei[ni];
+      // Slow drift + light gravity — suspended, not jittery
+      nuc.vy += 0.016;
+      nuc.vx += Math.sin(clock * 0.00055 + nuc.hue) * 0.010;
+      nuc.vy += Math.cos(clock * 0.00042 + ni * 1.7) * 0.006;
 
       const spd = Math.hypot(nuc.vx, nuc.vy);
-      if(spd > 7)   { nuc.vx *= 7/spd; nuc.vy *= 7/spd; }
-      if(spd < 0.5 && spd > 0.001) { nuc.vx *= 0.5/spd; nuc.vy *= 0.5/spd; }
+      if(spd > 3.2) { nuc.vx *= 3.2/spd; nuc.vy *= 3.2/spd; }
 
       nuc.x += nuc.vx;
       nuc.y += nuc.vy;
 
       // Comet trail
       nuc.trail.push({x:nuc.x, y:nuc.y});
-      if(nuc.trail.length > 14) nuc.trail.shift();
+      if(nuc.trail.length > 18) nuc.trail.shift();
 
       if(nuc.flash    > 0) nuc.flash--;
       if(nuc.cooldown > 0) nuc.cooldown--;
@@ -324,15 +328,18 @@
         nuc.y += bestNy*overlap;
         const dot = nuc.vx*bestNx + nuc.vy*bestNy;
         if(dot < 0) {
-          nuc.vx -= 2*dot*bestNx * 0.80;
-          nuc.vy -= 2*dot*bestNy * 0.80;
+          nuc.vx -= 2*dot*bestNx * 0.62;
+          nuc.vy -= 2*dot*bestNy * 0.62;
         }
         if(nuc.cooldown <= 0) {
           const vel = Math.abs(dot);
-          playNote(nuc.midi, Math.min(0.20, 0.06 + vel*0.018), 0.80);
-          nuc.flash    = 18;
-          nuc.cooldown = 18;
-          if(bestCp) wallFlashes.push({x:bestCp.x, y:bestCp.y, hue:nuc.hue, life:30, maxLife:30});
+          playNote(nuc.midi, Math.min(0.12, 0.045 + vel*0.014), 1.15);
+          nuc.flash    = 28;
+          nuc.cooldown = 28;
+          if(bestCp) {
+            wallFlashes.push({x:bestCp.x, y:bestCp.y, hue:nuc.hue, life:52, maxLife:52});
+            spawnEdgeWave(bestCp.x, bestCp.y, nuc.hue, 5 + Math.min(4, vel * 1.4));
+          }
         }
       }
     }
@@ -344,28 +351,173 @@
     }
   }
 
+  // ─── Gust ripple + membrane shimmer ───────────────────────────────────────
+  function spawnGustRipple(x, y) {
+    if (gustRipples.length >= 5) gustRipples.shift();
+    gustRipples.push({
+      x, y,
+      r: 6,
+      maxR: Math.min(W, H) * 0.36,
+      speed: Math.min(W, H) * 0.0026,
+    });
+  }
+
+  function spawnEdgeWave(px, py, hue, amp) {
+    if (!blbs.length) return;
+    const verts = blbs[0].ps;
+    let origin = 0, best = Infinity;
+    for (let i = 0; i < verts.length; i++) {
+      const dx = verts[i].x - px, dy = verts[i].y - py;
+      const d = dx*dx + dy*dy;
+      if (d < best) { best = d; origin = i; }
+    }
+    if (edgeWaves.length >= 8) edgeWaves.shift();
+    edgeWaves.push({
+      origin,
+      hue,
+      age: 0,
+      maxAge: 126,
+      amp,
+      speed: 0.30,
+      width: Math.max(6, verts.length * 0.09),
+    });
+  }
+
+  function updateWaves(dt) {
+    const frames = dt * 60;
+    for (let i = edgeWaves.length - 1; i >= 0; i--) {
+      edgeWaves[i].age += frames;
+      if (edgeWaves[i].age >= edgeWaves[i].maxAge) edgeWaves.splice(i, 1);
+    }
+    for (let i = gustRipples.length - 1; i >= 0; i--) {
+      gustRipples[i].r += gustRipples[i].speed * frames;
+      if (gustRipples[i].r >= gustRipples[i].maxR) gustRipples.splice(i, 1);
+    }
+  }
+
+  function edgeAt(i, n) {
+    let disp = 0, hSum = 0, wSum = 0;
+    for (const w of edgeWaves) {
+      const life = 1 - w.age / w.maxAge;
+      if (life <= 0) continue;
+      let d = Math.abs(i - w.origin);
+      d = Math.min(d, n - d);
+      const crest = w.age * w.speed;
+      const x = (d - crest) / w.width;
+      const mag = w.amp * life * life * Math.exp(-0.5 * x * x);
+      disp += mag;
+      wSum += mag;
+      hSum += w.hue * mag;
+    }
+    return { d: disp, hue: wSum > 0.001 ? hSum / wSum : 205 };
+  }
+
   // ─── Input ────────────────────────────────────────────────────────────────
   let mx, my, mxd, myd;
   let gusts = [];
-  const GUST_FRAMES = 14;
+  const GUST_FRAMES = 32;
   let bs, bm;
 
-  // Radial push outward from click point
+  let pointerDown = false;
+  let contact = 0; // 0–1, eases the hold-collider in and out
+
+  function membraneHit(px, py) {
+    if (!blbs.length) return { d: Infinity, nx: 0, ny: 1, i: 0 };
+    const verts = blbs[0].ps;
+    let bestD = Infinity, bestNx = 0, bestNy = 1, bestI = 0;
+    for (let i = 0; i < verts.length; i++) {
+      const v = verts[i];
+      const cp = closestPtOnSeg(px, py, v.x, v.y, v.n.x, v.n.y);
+      const d = Math.hypot(px - cp.x, py - cp.y);
+      if (d < bestD) {
+        bestD = d; bestI = i;
+        const ln = geo.lineNormal(v.x, v.y, v.n.x, v.n.y);
+        const len = Math.hypot(ln.x, ln.y) || 1;
+        bestNx = ln.x / len; bestNy = ln.y / len;
+      }
+    }
+    return { d: bestD, nx: bestNx, ny: bestNy, i: bestI };
+  }
+
+  // Soft dent: nearby verts yield along the surface normal, not radially
+  // (radial from a point on the rim shears the ring apart).
+  function pluckEdge(hit, inside, strength) {
+    const verts = blbs[0].ps;
+    const n = verts.length;
+    const nx = inside ? hit.nx : -hit.nx;
+    const ny = inside ? hit.ny : -hit.ny;
+    const sigma = Math.max(5, n * 0.07);
+    for (let i = 0; i < n; i++) {
+      let d = Math.abs(i - hit.i);
+      d = Math.min(d, n - d);
+      const w = Math.exp(-0.5 * (d / sigma) * (d / sigma));
+      if (w < 0.03) continue;
+      verts[i].x  += nx * 6.5 * w;
+      verts[i].y  += ny * 6.5 * w;
+      verts[i].vx += nx * strength * w;
+      verts[i].vy += ny * strength * w;
+    }
+  }
+
+  // Click: gust from inside/outside, pluck if you're on the skin.
   function pushBlob(px, py) {
-    gusts.push({ px, py, str: 7200*TENS, life: GUST_FRAMES });
+    spawnGustRipple(px, py);
+    const hit = membraneHit(px, py);
+    const band = Math.max(36, evDist * 5);
+    const onEdge = hit.d < band;
+    const inside = pointIn(px, py);
+    const closeness = onEdge ? 1 - hit.d / band : 0;
+
+    spawnEdgeWave(px, py, 205, 4.2 + closeness * 3.5);
+
+    if (onEdge) {
+      pluckEdge(hit, inside, 16 + closeness * 14);
+      gusts.push({ px, py, str: 900*TENS * (1 - closeness * 0.7), life: GUST_FRAMES });
+    } else {
+      gusts.push({ px, py, str: 3000*TENS, life: GUST_FRAMES });
+    }
+
+    for (const nuc of nuclei) {
+      const dx = nuc.x - px, dy = nuc.y - py;
+      const d = Math.hypot(dx, dy);
+      if (d < 1 || d > 160) continue;
+      const f = (1 - d / 160) ** 2 * 0.5;
+      nuc.vx += (dx / d) * f;
+      nuc.vy += (dy / d) * f;
+    }
+  }
+
+  function yieldToCursor(p, ox, oy, or, k) {
+    const dx = p.x - ox, dy = p.y - oy;
+    const d2 = dx*dx + dy*dy;
+    const cr = or + p.r;
+    if (d2 >= cr*cr || d2 < 1e-8) return;
+    const d = Math.sqrt(d2);
+    const m = (cr - d) * k;
+    p.move(dx / d * m, dy / d * m);
+  }
+
+  function canvasPos(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
   function setupInput() {
     canvas.addEventListener('pointermove', e => {
-      const r = canvas.getBoundingClientRect();
-      mxd = e.clientX - r.left;
-      myd = e.clientY - r.top;
+      const p = canvasPos(e);
+      mxd = p.x; myd = p.y;
     });
     canvas.addEventListener('pointerdown', e => {
       e.preventDefault();
-      const r = canvas.getBoundingClientRect();
-      pushBlob(e.clientX - r.left, e.clientY - r.top);
+      canvas.setPointerCapture(e.pointerId);
+      const p = canvasPos(e);
+      mx = mxd = p.x;
+      my = myd = p.y;
+      pointerDown = true;
+      pushBlob(p.x, p.y);
     });
+    canvas.addEventListener('pointerup', () => { pointerDown = false; });
+    canvas.addEventListener('pointercancel', () => { pointerDown = false; });
     document.addEventListener('keydown', e => {
       if(e.code==='KeyR') { scatterNuclei(); return; }
       const n = parseInt(e.key);
@@ -378,32 +530,76 @@
 
   // ─── Draw ─────────────────────────────────────────────────────────────────
   function draw() {
-    ctx.fillStyle = 'rgba(8,12,20,0.28)';
+    ctx.fillStyle = 'rgba(8,12,20,0.20)';
     ctx.fillRect(0, 0, W, H);
 
     if(blbs.length) {
-      const b=blbs[0]; let cp=b.rp;
+      const verts = blbs[0].ps;
+      const n = verts.length;
+      const pts = new Array(n);
+      for (let i = 0; i < n; i++) {
+        const v = verts[i];
+        let nx = v.n.y - v.p.y;
+        let ny = -(v.n.x - v.p.x);
+        const len = Math.hypot(nx, ny) || 1;
+        nx /= len; ny /= len;
+        const e = edgeAt(i, n);
+        pts[i] = { x: v.x + nx * e.d, y: v.y + ny * e.d, d: e.d, hue: e.hue };
+      }
+
       ctx.beginPath();
-      ctx.moveTo(cp.x, cp.y); cp=cp.n;
-      do { ctx.lineTo(cp.x, cp.y); cp=cp.n; } while(cp !== b.rp);
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < n; i++) ctx.lineTo(pts[i].x, pts[i].y);
       ctx.closePath();
       ctx.fillStyle = 'rgba(160,196,255,0.07)';
       ctx.fill();
-      ctx.strokeStyle = 'rgba(232,234,240,0.55)';
+      ctx.strokeStyle = 'rgba(232,234,240,0.48)';
       ctx.lineWidth = 1.5;
       ctx.stroke();
+
+      // Slow glow traveling along the membrane
+      for (let i = 0; i < n; i++) {
+        if (pts[i].d < 0.7) continue;
+        const a = Math.min(1, pts[i].d / 6) * 0.42;
+        ctx.save();
+        ctx.shadowColor = `hsl(${pts[i].hue},75%,68%)`;
+        ctx.shadowBlur = 10;
+        ctx.globalAlpha = a;
+        ctx.fillStyle = `hsl(${pts[i].hue},80%,76%)`;
+        ctx.beginPath();
+        ctx.arc(pts[i].x, pts[i].y, 1.6 + pts[i].d * 0.16, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Gust rings — a poke spreading through the gel
+      for (const rp of gustRipples) {
+        const t = 1 - rp.r / rp.maxR;
+        ctx.beginPath();
+        ctx.arc(rp.x, rp.y, rp.r, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(160,196,255,${0.20 * t * t})`;
+        ctx.lineWidth = 1.15;
+        ctx.stroke();
+        if (rp.r > 14) {
+          ctx.beginPath();
+          ctx.arc(rp.x, rp.y, rp.r * 0.58, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(160,196,255,${0.08 * t})`;
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+      }
 
       // Proximity aura — wall glows as nucleus approaches
       for(const nuc of nuclei) {
         if(!nuc.wallPt || nuc.wallDist > 75) continue;
         const prox = 1 - nuc.wallDist/75;
         ctx.save();
-        ctx.shadowColor = `hsl(${nuc.hue},90%,65%)`;
-        ctx.shadowBlur  = 18;
-        ctx.globalAlpha = prox * 0.55;
-        ctx.fillStyle   = `hsl(${nuc.hue},90%,70%)`;
+        ctx.shadowColor = `hsl(${nuc.hue},80%,65%)`;
+        ctx.shadowBlur  = 14;
+        ctx.globalAlpha = prox * 0.32;
+        ctx.fillStyle   = `hsl(${nuc.hue},85%,70%)`;
         ctx.beginPath();
-        ctx.arc(nuc.wallPt.x, nuc.wallPt.y, 3.5, 0, Math.PI*2);
+        ctx.arc(nuc.wallPt.x, nuc.wallPt.y, 3, 0, Math.PI*2);
         ctx.fill();
         ctx.restore();
       }
@@ -412,12 +608,12 @@
       for(const wf of wallFlashes) {
         const t = wf.life / wf.maxLife;
         ctx.save();
-        ctx.shadowColor = `hsl(${wf.hue},95%,70%)`;
-        ctx.shadowBlur  = 24 * t;
-        ctx.globalAlpha = t * 0.9;
-        ctx.fillStyle   = `hsl(${wf.hue},90%,75%)`;
+        ctx.shadowColor = `hsl(${wf.hue},80%,70%)`;
+        ctx.shadowBlur  = 16 * t;
+        ctx.globalAlpha = t * 0.5;
+        ctx.fillStyle   = `hsl(${wf.hue},85%,74%)`;
         ctx.beginPath();
-        ctx.arc(wf.x, wf.y, 5 * (0.5+t*0.5), 0, Math.PI*2);
+        ctx.arc(wf.x, wf.y, 4 * (0.55+t*0.45), 0, Math.PI*2);
         ctx.fill();
         ctx.restore();
       }
@@ -428,10 +624,10 @@
       const TL = nuc.trail.length;
       for(let k=0;k<TL;k++){
         const frac = (k+1)/TL;
-        ctx.globalAlpha = frac * 0.45;
-        ctx.fillStyle   = `hsl(${nuc.hue},85%,65%)`;
+        ctx.globalAlpha = frac * 0.30;
+        ctx.fillStyle   = `hsl(${nuc.hue},80%,65%)`;
         ctx.beginPath();
-        ctx.arc(nuc.trail[k].x, nuc.trail[k].y, nuc.r * frac * 0.7, 0, Math.PI*2);
+        ctx.arc(nuc.trail[k].x, nuc.trail[k].y, nuc.r * frac * 0.65, 0, Math.PI*2);
         ctx.fill();
       }
       ctx.globalAlpha = 1;
@@ -441,22 +637,25 @@
     for(const nuc of nuclei) {
       const flashing = nuc.flash > 0;
       ctx.save();
-      ctx.shadowColor = `hsl(${nuc.hue},90%,65%)`;
-      ctx.shadowBlur  = flashing ? 32 : 14;
-      ctx.fillStyle   = `hsl(${nuc.hue},90%,${flashing?82:66}%)`;
-      ctx.globalAlpha = flashing ? 1.0 : 0.88;
+      ctx.shadowColor = `hsl(${nuc.hue},85%,65%)`;
+      ctx.shadowBlur  = flashing ? 20 : 12;
+      ctx.fillStyle   = `hsl(${nuc.hue},88%,${flashing?74:66}%)`;
+      ctx.globalAlpha = flashing ? 0.96 : 0.86;
       ctx.beginPath();
-      ctx.arc(nuc.x, nuc.y, nuc.r * (flashing ? 1.5 : 1), 0, Math.PI*2);
+      ctx.arc(nuc.x, nuc.y, nuc.r * (flashing ? 1.16 : 1), 0, Math.PI*2);
       ctx.fill();
       ctx.restore();
     }
 
-    // Cursor repulsion ring
-    ctx.beginPath();
-    ctx.arc(mx, my, bs, 0, Math.PI*2);
-    ctx.strokeStyle = 'rgba(232,234,240,0.16)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
+    // Contact ring grows with the hold, so a press reads as a settle, not a pop
+    if (contact > 0.02) {
+      const u = contact * contact * (3 - 2 * contact);
+      ctx.beginPath();
+      ctx.arc(mx, my, bs * u, 0, Math.PI*2);
+      ctx.strokeStyle = `rgba(232,234,240,${0.18 * u})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
   }
 
   // ─── Loop ─────────────────────────────────────────────────────────────────
@@ -466,9 +665,15 @@
     const dt = Math.min((t-prev)/1000, 0.05);
     prev = t;
 
+    clock += dt * 1000;
     mx += (mxd-mx)*0.15;
     my += (myd-my)*0.15;
 
+    const tau = pointerDown ? 0.18 : 0.13;
+    contact += ((pointerDown ? 1 : 0) - contact) * (1 - Math.exp(-dt / tau));
+    if (!pointerDown && contact < 0.012) contact = 0;
+
+    updateWaves(dt);
     for(let i=parts.length;i--;) parts[i].updC();
 
     // Radial gust: push blob particles outward from click point
@@ -495,7 +700,14 @@
       for(let i=parts.length;i--;){const p=parts[i];const ln=geo.lineNormal(p.p.x,p.p.y,p.n.x,p.n.y);const d=p.parent.ad*INFL;p.move(ln.x*d,ln.y*d);}
       for(let i=jnts.length;i--;) jnts[i].upd(1);
       for(let i=parts.length;i--;){const p=parts[i];grid.q(p.x,p.y,p.r).forEach(o=>{if(o===p||o===p.n||o===p.p)return;const f=p.testCol(o.x,o.y,o.r);if(f){p.move(f.x*0.5,f.y*0.5);o.move(-f.x*0.5,-f.y*0.5);}});}
-      for(let i=parts.length;i--;){const p=parts[i];p.col(mx,my,bs+bm);p.con(0,0,W,H);p.end(sdt);}
+      for(let i=parts.length;i--;){
+        const p=parts[i];
+        if(contact > 0.02) {
+          const u = contact * contact * (3 - 2 * contact);
+          yieldToCursor(p, mx, my, (bs + bm) * u, 0.10 * u);
+        }
+        p.con(0,0,W,H); p.end(sdt);
+      }
     }
 
     updateNuclei();
