@@ -52,7 +52,7 @@
   </style>
 </head>
 <body>
-  <canvas id="canvas" aria-label="slosh. heavy drops in a gel cell. pull a drop to sling it; they dent the skin and stain the film."></canvas>
+  <canvas id="canvas" aria-label="slosh. press the gel to squish it, pluck the rim to wobble it, pull a drop to sling it."></canvas>
   <div class="begin-screen" id="begin">
     <div class="name">slosh</div>
     <div>touch to begin</div>
@@ -70,29 +70,30 @@
   let ctx, W, H;
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  // Three heavies, all with swell's finger well. Balls are massive: they
-  // deform the rim on impact and stamp the film differently from a touch
-  // (touch sinks a cool well; balls raise hills, leave a wake, or stain).
+  // Finger squish is a hold-collider + rim pluck (original slosh). Balls still
+  // punch the wall and stamp the film; a held drop bulges the drawn rim with
+  // the traveling edge-wave so the Verlet mesh stays smooth while slinging.
+  //   dentPress  how hard empty-gel press yields the membrane
   //   mass       scales collisions and wall punches
   //   ballSkin   + hills / wake, − colored dimples
   //   slingK     snap toward the grab-anchor on release
   const MODES = {
     tow: {
       grab: 'orb', grabPad: 40, follow: 0.14, slingK: 0.24, flick: 0.58,
-      maxStretch: 0.38, cap: 9.5, bounce: 0.84, damp: 0.993, pullOut: 70,
-      wallPush: 13, ballBounce: 0.86, tetherPull: 1.12, dentPress: 7,
+      maxStretch: 0.38, cap: 9.5, bounce: 0.84, damp: 0.993, pullOut: 36,
+      wallPush: 13, ballBounce: 0.86, tetherPull: 0.38, dentPress: 9,
       well: 1.12, gather: 0.72, filament: 1, mass: 1.35, ballSkin: 0.62,
     },
     lead: {
       grab: 'orb', grabPad: 42, follow: 0.10, slingK: 0.20, flick: 0.38,
-      maxStretch: 0.40, cap: 8.2, bounce: 0.72, damp: 0.994, pullOut: 64,
-      wallPush: 20, ballBounce: 0.78, tetherPull: 0.92, dentPress: 8,
+      maxStretch: 0.40, cap: 8.2, bounce: 0.72, damp: 0.994, pullOut: 38,
+      wallPush: 20, ballBounce: 0.78, tetherPull: 0.30, dentPress: 10,
       well: 1.08, gather: 0.50, filament: 1, mass: 1.85, ballSkin: 0.95,
     },
     soak: {
       grab: 'orb', grabPad: 38, follow: 0.13, slingK: 0.18, flick: 0.45,
-      maxStretch: 0.34, cap: 7.6, bounce: 0.80, damp: 0.992, pullOut: 68,
-      wallPush: 11, ballBounce: 0.84, tetherPull: 0.80, dentPress: 11,
+      maxStretch: 0.34, cap: 7.6, bounce: 0.80, damp: 0.992, pullOut: 34,
+      wallPush: 11, ballBounce: 0.84, tetherPull: 0.26, dentPress: 13,
       well: 1.28, gather: 1.05, filament: 1, mass: 1.28, ballSkin: -0.72,
     },
   };
@@ -258,7 +259,7 @@
     testCol(ox,oy,or){const dx=ox-this.x,dy=oy-this.y,d=dx*dx+dy*dy,cr=or+this.r;if(d<cr*cr){const fm=Math.sqrt(d)-cr,im=1/d;return{x:dx*im*fm,y:dy*im*fm};}return null;}
     con(l,t,r,b){let c=false;if(this.x>r-2){this.x=r-2;c=true;}else if(this.x<l+2){this.x=l+2;c=true;}if(this.y>b-2){this.y=b-2;c=true;}else if(this.y<t+2){this.y=t+2;c=true;}if(c){this.px+=(this.x-this.px)*this.friction;this.py+=(this.y-this.py)*this.friction;}}
     upd(dt=1){this.px=this.x;this.py=this.y;this.x+=this.vx*dt;this.y+=this.vy*dt;}
-    end(dt=1){const m=this.damping/dt;this.vx=(this.x-this.px)*m;this.vy=(this.y-this.py)*m;}
+    end(dt=1){const m=this.damping/Math.max(dt,1e-6);this.vx=(this.x-this.px)*m;this.vy=(this.y-this.py)*m;}
     updC(){if(this.c)this.c.upd();}
   }
   class CP extends P { setR(v){this.isR=v;} setN(v){this.n=v;} setP(v){this.p=v;} }
@@ -308,12 +309,14 @@
     const c = blobCentroid();
     skinCx = c.x; skinCy = c.y;
     const rest = blbs[0] ? blbs[0].r : Math.min(W, H) * 0.3;
-    // Keep cell size stable so a sling stretch does not coarsen the film.
-    skinR = rest * 1.32;
+    // Cover a sling pocket and the visual rim bulge without resizing cells
+    // every frame (that coarsened the film and made the edge crawl).
+    skinR = rest * 1.12 + Math.min(W, H) * 0.22;
     skinCell = (skinR * 2) / SKIN_N;
+    const inner = skinR - skinCell * 0.55;
     for (let j = 0; j < SKIN_N; j++) for (let i = 0; i < SKIN_N; i++) {
       const p = skinXY(i, j);
-      skinMask[sidx(i, j)] = Math.hypot(p.x - skinCx, p.y - skinCy) < skinR ? 1 : 0;
+      skinMask[sidx(i, j)] = Math.hypot(p.x - skinCx, p.y - skinCy) < inner ? 1 : 0;
     }
   }
 
@@ -401,7 +404,10 @@
       const lit = nx * 0.42 + ny * 0.62;
       const form = -((p.x - skinCx) / skinR) * 0.16 - ((p.y - skinCy) / skinR) * 0.26;
       const light = 0.40 + lit * 0.52 - z * 0.30 + form;
-      const alpha = 0.22 + Math.abs(z) * 0.44;
+      const dist = Math.hypot(p.x - skinCx, p.y - skinCy);
+      const fade = Math.max(0, Math.min(1, (skinR - dist) / (skinCell * 2.2)));
+      if (fade < 0.05) continue;
+      const alpha = (0.22 + Math.abs(z) * 0.44) * fade;
       let hue = 186 + z * -48 + rough * 36 + lit * 18;
       let tint = 0, tw = 0;
       for (const nuc of nuclei) {
@@ -432,9 +438,13 @@
 
   function blobCentroid() {
     if (!parts.length) return { x: W/2, y: H*0.52 };
-    let x=0, y=0;
-    for (const p of parts) { x+=p.x; y+=p.y; }
-    return { x: x/parts.length, y: y/parts.length };
+    let x=0, y=0, n=0;
+    for (const p of parts) {
+      if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+      x+=p.x; y+=p.y; n++;
+    }
+    if (!n) return { x: W/2, y: H*0.52 };
+    return { x: x/n, y: y/n };
   }
 
   function pointIn(px, py) {
@@ -471,8 +481,12 @@
   let wallFlashes = [];
   let gustRipples = [];
   let edgeWaves = [];
+  let gusts = [];
+  const GUST_FRAMES = 32;
   let clock = 0;
   let lastStrokeAt = 0;
+  let rimCache = { i: 0, bulge: 0, hue: 205 };
+  let squishR = 120;
 
   function initNuclei() {
     nuclei = NUCLEUS_DEFS.map((def, i) => ({
@@ -495,6 +509,7 @@
     wallFlashes = [];
     gustRipples = [];
     edgeWaves = [];
+    gusts = [];
   }
 
   function scatterNuclei() {
@@ -714,9 +729,9 @@
       hue,
       age: 0,
       maxAge: 126,
-      amp,
-      speed: 0.30,
-      width: Math.max(6, verts.length * 0.09),
+      amp: Math.min(amp, 8),
+      speed: 0.28,
+      width: Math.max(8, verts.length * 0.14),
     });
   }
 
@@ -732,8 +747,22 @@
     }
   }
 
+  function refreshRimCache() {
+    rimCache.bulge = 0;
+    rimCache.hue = 205;
+    if (!grabbing || !blbs.length) return;
+    const hit = membraneHit(grabbing.x, grabbing.y);
+    rimCache.i = hit.i;
+    rimCache.hue = grabbing.hue;
+    const inside = pointIn(grabbing.x, grabbing.y);
+    const poke = inside
+      ? Math.max(0, grabbing.r + 52 - hit.d)
+      : hit.d + grabbing.r * 0.55;
+    rimCache.bulge = Math.min(34, poke * 0.9);
+  }
+
   function edgeAt(i, n) {
-    let disp = 0, hSum = 0, wSum = 0;
+    let disp = 0, wave = 0, hSum = 0, wSum = 0;
     for (const w of edgeWaves) {
       const life = 1 - w.age / w.maxAge;
       if (life <= 0) continue;
@@ -743,10 +772,21 @@
       const x = (d - crest) / w.width;
       const mag = w.amp * life * life * Math.exp(-0.5 * x * x);
       disp += mag;
+      wave += mag;
       wSum += mag;
       hSum += w.hue * mag;
     }
-    return { d: disp, hue: wSum > 0.001 ? hSum / wSum : 205 };
+    if (rimCache.bulge > 0.25) {
+      let d = Math.abs(i - rimCache.i);
+      d = Math.min(d, n - d);
+      const sigma = Math.max(10, n * 0.16);
+      const mag = rimCache.bulge * Math.exp(-0.5 * (d / sigma) * (d / sigma));
+      disp += mag;
+      wSum += mag;
+      hSum += rimCache.hue * mag;
+    }
+    if (disp > 24) disp = 24;
+    return { d: disp, wave, hue: wSum > 0.001 ? hSum / wSum : 205 };
   }
 
   // ─── Input ────────────────────────────────────────────────────────────────
@@ -805,71 +845,69 @@
     p.px += dx; p.py += dy;
   }
 
-  // Wrap the rim around a held drop as it nears or crosses the wall, so the
-  // ball rides in a stretched pocket instead of punching through.
+  // Wrap the rim around a held drop as it nears the wall — lightly. The
+  // visible pocket is mostly the edge-wave bulge, so the Verlet ring does
+  // not invert and the film stays attached.
   function applyTether() {
     if (!grabbing || !blbs.length) return;
     const verts = blbs[0].ps;
     const n = verts.length;
     const inside = pointIn(grabbing.x, grabbing.y);
     const hit = membraneHit(grabbing.x, grabbing.y);
-    if (inside && hit.d > grabbing.r + 40) return;
+    if (inside && hit.d > grabbing.r + 28) return;
 
     const c = blobCentroid();
     let ax = grabbing.x - c.x, ay = grabbing.y - c.y;
     const len = Math.hypot(ax, ay) || 1;
     const ux = ax / len, uy = ay / len;
-    const tx = grabbing.x - ux * grabbing.r * 0.25;
-    const ty = grabbing.y - uy * grabbing.r * 0.25;
+    const tx = grabbing.x - ux * grabbing.r * 0.45;
+    const ty = grabbing.y - uy * grabbing.r * 0.45;
 
-    const sigma = Math.max(6, n * 0.14);
-    const pull = mode.tetherPull * 0.40;
+    const sigma = Math.max(8, n * 0.12);
+    const pull = mode.tetherPull * 0.10;
     for (let i = 0; i < n; i++) {
       let d = Math.abs(i - hit.i);
       d = Math.min(d, n - d);
       const w = Math.exp(-0.5 * (d / sigma) * (d / sigma));
-      if (w < 0.02) continue;
+      if (w < 0.04) continue;
       let dx = (tx - verts[i].x) * pull * w;
       let dy = (ty - verts[i].y) * pull * w;
       const md = Math.hypot(dx, dy);
-      if (md > 14) { dx *= 14 / md; dy *= 14 / md; }
+      if (md > 2.6) { dx *= 2.6 / md; dy *= 2.6 / md; }
       kMove(verts[i], dx, dy);
     }
-    for (let k = 0; k < 5; k++) for (let i = jnts.length; i--;) jnts[i].upd(1);
+    for (let k = 0; k < 4; k++) for (let i = jnts.length; i--;) jnts[i].upd(1);
   }
 
-  // Finger on empty gel: a soft inward well. Kinematic, and scaled for the
-  // 20 Verlet substeps so a click cannot ram the wall into itself.
-  function applyDent(strength) {
-    if (grabbing || !blbs.length || strength < 0.02) return;
+  // Finger is a soft disc that shoves ring verts away — same collider as
+  // the original slosh, so empty gel yields and then wobbles back.
+  function yieldToCursor(p, ox, oy, or, k) {
+    const dx = p.x - ox, dy = p.y - oy;
+    const d2 = dx * dx + dy * dy;
+    const cr = or + p.r;
+    if (d2 >= cr * cr || d2 < 1e-8) return;
+    const d = Math.sqrt(d2);
+    const m = Math.min((cr - d) * k, 2.8);
+    p.move(dx / d * m, dy / d * m);
+  }
+
+  function pluckEdge(hit, inside, strength) {
+    if (!blbs.length) return;
     const verts = blbs[0].ps;
     const n = verts.length;
-    const hit = membraneHit(mx, my);
-    const inside = pointIn(mx, my);
-    const rim = Math.max(28, evDist * 3.4);
-    // Finger on the rim used to yank verts and fight self-collision.
-    if (hit.d < rim) return;
-    let influence;
-    if (inside) {
-      const reach = Math.min(W, H) * 0.32;
-      influence = Math.max(0, 1 - hit.d / reach);
-      influence *= influence;
-    } else {
-      const band = Math.max(44, evDist * 6);
-      if (hit.d > band) return;
-      influence = 1 - hit.d / band;
-    }
-    const depth = strength * influence * mode.dentPress * 0.055;
-    if (depth < 0.02) return;
     const nx = inside ? hit.nx : -hit.nx;
     const ny = inside ? hit.ny : -hit.ny;
-    const sigma = Math.max(5, n * 0.08);
+    const sigma = Math.max(6, n * 0.08);
+    const kick = Math.min(strength, 11);
     for (let i = 0; i < n; i++) {
       let d = Math.abs(i - hit.i);
       d = Math.min(d, n - d);
       const w = Math.exp(-0.5 * (d / sigma) * (d / sigma));
       if (w < 0.03) continue;
-      kMove(verts[i], nx * depth * w, ny * depth * w);
+      verts[i].x  += nx * 3.4 * w;
+      verts[i].y  += ny * 3.4 * w;
+      verts[i].vx += nx * kick * w;
+      verts[i].vy += ny * kick * w;
     }
   }
 
@@ -882,6 +920,23 @@
 
   function onPress(px, py) {
     spawnGustRipple(px, py);
+    if (grabbing || !blbs.length || reduceMotion) return;
+    const hit = membraneHit(px, py);
+    const band = Math.max(36, evDist * 5);
+    const onEdge = hit.d < band;
+    const inside = pointIn(px, py);
+    if (!inside && hit.d > band * 1.2) return;
+    const closeness = onEdge ? 1 - hit.d / band : 0;
+    spawnEdgeWave(px, py, 205, 3.8 + closeness * 2.6);
+    if (onEdge) {
+      pluckEdge(hit, inside, 6.5 + closeness * 5);
+      playNote(angleToMidi(px, py), 0.04, 0.5);
+    }
+    gusts.push({
+      px, py,
+      str: (onEdge ? 420 : 980) * TENS * (0.5 + mode.dentPress * 0.05),
+      life: GUST_FRAMES,
+    });
   }
 
   function maybeStrokeNote() {
@@ -967,10 +1022,11 @@
     let spd = Math.hypot(grabbing.vx, grabbing.vy);
     if (spd > mode.cap) { grabbing.vx *= mode.cap / spd; grabbing.vy *= mode.cap / spd; spd = mode.cap; }
     if (spd > 1.2) playNote(grabbing.midi, Math.min(0.14, 0.04 + spd * 0.018), 0.85);
+    spawnEdgeWave(grabbing.x, grabbing.y, grabbing.hue, 4.6 + Math.min(3.5, power * 0.45));
     seatNucleus(grabbing);
     grabbing.grace = 12;
     const hit = membraneHit(grabbing.x, grabbing.y);
-    pushMembrane(hit.i, nxs, nys, Math.min(8, power * 0.55), blbs[0] ? blbs[0].ps.length : 0);
+    pushMembrane(hit.i, nxs, nys, Math.min(4.2, power * 0.28), blbs[0] ? blbs[0].ps.length : 0);
     grabbing.held = false;
     grabbing = null;
     grabAnchor = null;
@@ -1060,19 +1116,33 @@
     if (blbs.length) {
       const verts = blbs[0].ps;
       const n = verts.length;
-      const pts = new Array(n);
+      const rawN = new Array(n);
       for (let i = 0; i < n; i++) {
         const v = verts[i];
         let nx = v.n.y - v.p.y;
         let ny = -(v.n.x - v.p.x);
         const len = Math.hypot(nx, ny) || 1;
-        nx /= len; ny /= len;
+        rawN[i] = { x: nx / len, y: ny / len };
+      }
+      const pts = new Array(n);
+      for (let i = 0; i < n; i++) {
+        const a = rawN[(i + n - 1) % n], b = rawN[i], c = rawN[(i + 1) % n];
+        let nx = a.x + b.x * 2 + c.x;
+        let ny = a.y + b.y * 2 + c.y;
+        const len = Math.hypot(nx, ny) || 1;
         const e = edgeAt(i, n);
-        pts[i] = { x: v.x + nx * e.d, y: v.y + ny * e.d, d: e.d, hue: e.hue };
+        pts[i] = {
+          x: verts[i].x + nx / len * e.d,
+          y: verts[i].y + ny / len * e.d,
+          d: e.d, wave: e.wave, hue: e.hue,
+        };
       }
 
       const c = blobCentroid();
       const rad = blbs[0].r;
+      if (!Number.isFinite(c.x) || !Number.isFinite(c.y) || !Number.isFinite(rad) || rad <= 0) {
+        return;
+      }
       ctx.lineJoin = 'round';
       ctx.lineCap = 'round';
       ctx.save();
@@ -1094,20 +1164,23 @@
       if (contact > 0.04) {
         const src = grabbing || { x: mx, y: my };
         const wrad = 36 + contact * 28 * (0.45 + mode.well * 0.55);
-        const well = ctx.createRadialGradient(src.x, src.y, 0, src.x, src.y, wrad);
-        well.addColorStop(0, `rgba(4, 10, 18, ${0.38 * contact * (0.5 + mode.well * 0.5)})`);
-        well.addColorStop(0.40, `hsla(198, 62%, 42%, ${0.14 * contact})`);
-        well.addColorStop(0.72, `hsla(214, 70%, 72%, ${0.16 * contact})`);
-        well.addColorStop(1, 'rgba(0,0,0,0)');
-        ctx.fillStyle = well;
-        ctx.beginPath();
-        ctx.arc(src.x, src.y, wrad, 0, Math.PI * 2);
-        ctx.fill();
+        if (Number.isFinite(src.x) && Number.isFinite(src.y) && Number.isFinite(wrad) && wrad > 0) {
+          const well = ctx.createRadialGradient(src.x, src.y, 0, src.x, src.y, wrad);
+          well.addColorStop(0, `rgba(4, 10, 18, ${0.38 * contact * (0.5 + mode.well * 0.5)})`);
+          well.addColorStop(0.40, `hsla(198, 62%, 42%, ${0.14 * contact})`);
+          well.addColorStop(0.72, `hsla(214, 70%, 72%, ${0.16 * contact})`);
+          well.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = well;
+          ctx.beginPath();
+          ctx.arc(src.x, src.y, wrad, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
-      // Soft inner rim so cell stairs never meet the clip.
+      // Soft inner rim so cell stairs never meet the clip. Widen it a little
+      // when the visual pocket is out, so the film does not fray.
       drawSmoothBlob(pts);
-      ctx.strokeStyle = 'rgba(16, 32, 48, 0.78)';
-      ctx.lineWidth = 5;
+      ctx.strokeStyle = 'rgba(16, 32, 48, 0.82)';
+      ctx.lineWidth = 5.5 + Math.min(4, rimCache.bulge * 0.12);
       ctx.stroke();
       ctx.restore();
 
@@ -1142,15 +1215,15 @@
       ctx.stroke();
 
       for (let i = 0; i < n; i++) {
-        if (pts[i].d < 1.6) continue;
-        const a = Math.min(1, pts[i].d / 6) * 0.42;
+        if (pts[i].wave < 1.6) continue;
+        const a = Math.min(1, pts[i].wave / 6) * 0.42;
         ctx.save();
         ctx.shadowColor = `hsl(${pts[i].hue},75%,68%)`;
         ctx.shadowBlur = 10;
         ctx.globalAlpha = a;
         ctx.fillStyle = `hsl(${pts[i].hue},80%,76%)`;
         ctx.beginPath();
-        ctx.arc(pts[i].x, pts[i].y, 1.6 + pts[i].d * 0.16, 0, Math.PI * 2);
+        ctx.arc(pts[i].x, pts[i].y, 1.6 + pts[i].wave * 0.16, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
       }
@@ -1216,7 +1289,7 @@
     const touch = Math.max(contact, hover * 0.55);
     if (touch > 0.02) {
       const u = touch * touch * (3 - 2 * touch);
-      const rad = grabbing ? grabbing.r * 1.8 : (18 + 10 * contact);
+      const rad = grabbing ? grabbing.r * 1.8 : (Math.min(W, H) * 0.08 + 8);
       ctx.beginPath();
       ctx.arc(mx, my, rad * u, 0, Math.PI*2);
       ctx.strokeStyle = `rgba(232,234,240,${0.16 * u})`;
@@ -1229,8 +1302,12 @@
   let prev = 0;
 
   function loop(t) {
-    const dt = Math.min((t-prev)/1000, 0.05);
+    const dt = Math.min(Math.max((t-prev)/1000, 0), 0.05);
     prev = t;
+    if (dt < 1 / 240) {
+      requestAnimationFrame(loop);
+      return;
+    }
 
     clock += dt * 1000;
     mx += (mxd - mx) * (pointerDown ? (grabbing ? 0.50 : 0.84) : 0.22);
@@ -1290,14 +1367,40 @@
 
     if (blbs.length && !reduceMotion) {
       const breath = 1 + Math.sin(clock * 0.00105) * 0.016;
-      blbs[0].ar = blbs[0].baseAr * breath;
+      const squeeze = (pointerDown && !grabbing && inside)
+        ? 1 - 0.11 * contact * (mode.dentPress / 10)
+        : 1;
+      blbs[0].ar = blbs[0].baseAr * breath * squeeze;
     }
 
     updateWaves(dt);
     for (let i=parts.length;i--;) parts[i].updC();
 
+    if (!reduceMotion) {
+      for (let g = gusts.length; g--;) {
+        const gust = gusts[g];
+        gust.life--;
+        const fade = (gust.life / GUST_FRAMES) ** 2;
+        if (gust.life <= 0) { gusts.splice(g, 1); continue; }
+        const reach = Math.min(W, H) * 0.62;
+        for (let i = parts.length; i--;) {
+          const p = parts[i];
+          const dx = p.x - gust.px, dy = p.y - gust.py;
+          const d = Math.hypot(dx, dy);
+          if (d < 1 || d > reach) continue;
+          const falloff = (1 - d / reach) ** 2;
+          p.vx += (dx / d) * gust.str * falloff * fade * dt;
+          p.vy += (dy / d) * gust.str * falloff * fade * dt;
+        }
+      }
+    }
+
     const sdt = dt / 20;
-    const dent = contact * 0.92;
+    const squishU = (!grabbing && contact > 0.02)
+      ? contact * contact * (3 - 2 * contact)
+      : 0;
+    const squishK = squishU * 0.12 * (mode.dentPress / 8);
+    const squishRad = squishR * squishU;
     for (let s=20;s--;){
       for (let i=blbs.length;i--;){ const b=blbs[i]; b.ca=geo.polyArea(b.ps); b.ad=(b.ar-b.ca)/b.ar; }
       for (let i=parts.length;i--;){
@@ -1329,7 +1432,9 @@
           if (f){ p.move(f.x*0.5,f.y*0.5); o.move(-f.x*0.5,-f.y*0.5); }
         });
       }
-      applyDent(dent);
+      if (squishU > 0.02) {
+        for (let i = parts.length; i--;) yieldToCursor(parts[i], mx, my, squishRad, squishK);
+      }
       for (let i=parts.length;i--;){
         const p=parts[i];
         p.con(0,0,W,H); p.end(sdt);
@@ -1349,6 +1454,7 @@
 
     updateNuclei(dt);
     applyTether();
+    refreshRimCache();
     draw();
     requestAnimationFrame(loop);
   }
@@ -1362,6 +1468,8 @@
 
     mx  = mxd = W/2;
     my  = myd = H/2;
+    const mob = Math.min(W, H) < 600;
+    squishR = Math.min(W, H) * (mob ? 0.09 : 0.07) + (mob ? 60 : 100);
 
     initBlob();
     initSkin();
@@ -1376,6 +1484,8 @@
     window.addEventListener('resize', () => {
       setupCanvas();
       mx = mxd = W/2; my = myd = H/2;
+      const m = Math.min(W, H) < 600;
+      squishR = Math.min(W, H) * (m ? 0.09 : 0.07) + (m ? 60 : 100);
       initBlob();
       initSkin();
       initNuclei();
