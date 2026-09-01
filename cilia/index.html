@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>cilia</title>
+  <link rel="stylesheet" href="../shared/theme.css">
+  <style>
+    .begin-screen { flex-direction: column; gap: 10px; }
+    .begin-screen .name { font-size: 30px; letter-spacing: 0.22em; color: rgba(232,234,240,0.88); }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div class="begin-screen" id="begin">
+    <div class="name">cilia</div>
+    <div>touch to begin</div>
+  </div>
+  <script src="../shared/audio.js"></script>
+  <script>
+  'use strict';
+
+  const canvas = document.getElementById('canvas');
+  let ctx, W, H, t0 = 0, clock = 0;
+
+  function setupCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    W = rect.width; H = rect.height;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+  }
+
+  let audioCtx, masterGain, reverbNode, drone = null, voices = 0;
+  let currentScale = 'pentatonic';
+
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    audioCtx.resume();
+    const warmth = audioCtx.createBiquadFilter();
+    warmth.type = 'lowpass'; warmth.frequency.value = 2800; warmth.Q.value = 0.38;
+    warmth.connect(audioCtx.destination);
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.30;
+    masterGain.connect(warmth);
+
+    const sr = audioCtx.sampleRate, len = Math.floor(sr * 2.6);
+    const buf = audioCtx.createBuffer(2, len, sr);
+    for (let c = 0; c < 2; c++) {
+      const ch = buf.getChannelData(c);
+      for (let i = 0; i < len; i++) ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.25);
+    }
+    reverbNode = audioCtx.createConvolver();
+    reverbNode.buffer = buf;
+    const wet = audioCtx.createGain(); wet.gain.value = 0.62;
+    reverbNode.connect(wet); wet.connect(masterGain);
+
+    const oscA = audioCtx.createOscillator();
+    const oscB = audioCtx.createOscillator();
+    const oscC = audioCtx.createOscillator();
+    const gB = audioCtx.createGain(); gB.gain.value = 0.22;
+    const gC = audioCtx.createGain(); gC.gain.value = 0.08;
+    const filt = audioCtx.createBiquadFilter();
+    const g = audioCtx.createGain();
+    oscA.type = 'sine';     oscA.frequency.value = 98;
+    oscB.type = 'sine';     oscB.frequency.value = 147;
+    oscC.type = 'triangle'; oscC.frequency.value = 196;
+    filt.type = 'lowpass';  filt.frequency.value = 260; filt.Q.value = 0.65;
+    g.gain.value = 0.0001;
+    oscA.connect(filt);
+    oscB.connect(gB); gB.connect(filt);
+    oscC.connect(gC); gC.connect(filt);
+    filt.connect(g); g.connect(masterGain); g.connect(reverbNode);
+    oscA.start(); oscB.start(); oscC.start();
+    drone = { oscA, oscB, oscC, filt, g };
+
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && audioCtx.state === 'suspended') audioCtx.resume();
+    });
+    window.addEventListener('pageshow', () => {
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    });
+  }
+
+  function playPluck(midi, vol = 0.06) {
+    if (!audioCtx || voices >= 9) return;
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const freq = 440 * Math.pow(2, (midi - 69) / 12);
+    const now = audioCtx.currentTime;
+    voices++; setTimeout(() => voices--, 1000);
+    const osc = audioCtx.createOscillator();
+    const env = audioCtx.createGain();
+    osc.type = 'sine'; osc.frequency.value = freq;
+    env.gain.setValueAtTime(0.0001, now);
+    env.gain.linearRampToValueAtTime(vol * 0.85, now + 0.04);
+    env.gain.exponentialRampToValueAtTime(vol * 0.28, now + 0.22);
+    env.gain.exponentialRampToValueAtTime(0.0001, now + 1.05);
+    osc.connect(env); env.connect(masterGain); env.connect(reverbNode);
+    osc.start(now); osc.stop(now + 1.1);
+  }
+
+  const SEG = 5;
+  // near @ 200 — fingertip comb, in case we want it back
+  // const influence = 200;
+  // const mode = {
+  //   span: 0.10, flank: 0.085, dragTau: 0.09,
+  //   visc: 0.055, decay: 0.9983, carry: 48, confine: 0.20, cap: 3.1,
+  //   follow: 1.08, spring: 0.14, neighbor: 0.14, damp: 0.73, maxRel: 1.12,
+  //   comb: 1.62, combSpan: 0.058,
+  // };
+  const influence = 150;
+  const mode = {
+    span: 0.24, flank: 0.11, dragTau: 0.10,
+    visc: 0.075, decay: 0.9985, carry: 42, confine: 0.24, cap: 3.4,
+    follow: 1.18, spring: 0.11, neighbor: 0.18, damp: 0.70, maxRel: 1.18,
+    comb: 1.45, combSpan: 0.082,
+  };
+  function influenceT() { return influence / 100; }
+  function paddleSpan() { return 0.09 + influenceT() * 0.30; }
+
+  let hairs = [];
+  let cols = 0, rows = 0;
+  let gusts = [];
+  let motes = [];
+  let motesIdle = [];
+  let rays = [];
+  let pointers = new Map();
+  let bentSmoothed = 0;
+  let lastPluckAt = 0;
+  let lastActive = 0;
+  const IDLE_WAVE = 3;
+  const IDLE_SETTLE = 5;
+  let nextSplashAt = IDLE_WAVE;
+  let idleWaved = false;
+  let swells = [];
+  let combs = [];
+
+  let fCols = 0, fRows = 0, fCell = 36;
+  let FX, FY, FXn, FYn;
+
+  function fi(i, j) { return j * fCols + i; }
+
+  function initFlow() {
+    fCell = Math.max(16, Math.min(W, H) / 28);
+    fCols = Math.ceil(W / fCell) + 2;
+    fRows = Math.ceil(H / fCell) + 2;
+    const n = fCols * fRows;
+    FX  = new Float32Array(n);
+    FY  = new Float32Array(n);
+    FXn = new Float32Array(n);
+    FYn = new Float32Array(n);
+  }
+
+  function stampFlow(x, y, dvx, dvy) {
+    const mag = Math.hypot(dvx, dvy);
+    if (mag < 0.012) return;
+    const P = mode;
+    const nx = dvx / mag, ny = dvy / mag;
+    const span = Math.min(W, H) * paddleSpan();
+    // Stir here, with a little trail — the paddle is in the water.
+    const back = span * 0.14;
+    const cx = (x - nx * back) / fCell;
+    const cy = (y - ny * back) / fCell;
+    const sigAlong  = span / fCell * 0.62;
+    const sigAcross = span / fCell * 0.34;
+    const rad = Math.max(sigAlong, sigAcross) * 2.5;
+    const r2 = rad * rad;
+    const i0 = Math.max(1, Math.floor(cx - rad));
+    const i1 = Math.min(fCols - 2, Math.ceil(cx + rad));
+    const j0 = Math.max(1, Math.floor(cy - rad));
+    const j1 = Math.min(fRows - 2, Math.ceil(cy + rad));
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const dx = i - cx, dy = j - cy;
+        if (dx * dx + dy * dy > r2) continue;
+        const along  = dx * nx + dy * ny;
+        const across = -dx * ny + dy * nx;
+        const g = Math.exp(-0.5 * (along * along / (sigAlong * sigAlong) + across * across / (sigAcross * sigAcross)));
+        const k = fi(i, j);
+        FX[k] += dvx * g;
+        FY[k] += dvy * g;
+        // Cross-cutting a current sheds a pair of eddies.
+        const swirl = across * g * mag * P.flank;
+        FX[k] += -ny * swirl;
+        FY[k] +=  nx * swirl;
+      }
+    }
+  }
+
+  function curlAt(i, j, bx, by) {
+    const i1 = Math.min(fCols - 1, i + 1), i0 = Math.max(0, i - 1);
+    const j1 = Math.min(fRows - 1, j + 1), j0 = Math.max(0, j - 1);
+    return (by[fi(i1, j)] - by[fi(i0, j)]) - (bx[fi(i, j1)] - bx[fi(i, j0)]);
+  }
+
+  function sampleFlow(x, y, bufX = FX, bufY = FY) {
+    const u = x / fCell, v = y / fCell;
+    let i = Math.floor(u), j = Math.floor(v);
+    if (i < 0) i = 0; if (j < 0) j = 0;
+    if (i > fCols - 2) i = fCols - 2;
+    if (j > fRows - 2) j = fRows - 2;
+    const fu = Math.min(1, Math.max(0, u - i));
+    const fv = Math.min(1, Math.max(0, v - j));
+    const a = fi(i, j), b = fi(i + 1, j), c = fi(i, j + 1), d = fi(i + 1, j + 1);
+    const fx = bufX[a] * (1 - fu) * (1 - fv) + bufX[b] * fu * (1 - fv)
+             + bufX[c] * (1 - fu) * fv       + bufX[d] * fu * fv;
+    const fy = bufY[a] * (1 - fu) * (1 - fv) + bufY[b] * fu * (1 - fv)
+             + bufY[c] * (1 - fu) * fv       + bufY[d] * fu * fv;
+    return { fx, fy };
+  }
+
+  function stepFlow(dt) {
+    const P = mode;
+    const decay = Math.pow(P.decay, dt * 60);
+    const visc  = P.visc;
+    for (let j = 1; j < fRows - 1; j++) {
+      for (let i = 1; i < fCols - 1; i++) {
+        const k = fi(i, j);
+        const lx = (FX[fi(i - 1, j)] + FX[fi(i + 1, j)] + FX[fi(i, j - 1)] + FX[fi(i, j + 1)]) * 0.25 - FX[k];
+        const ly = (FY[fi(i - 1, j)] + FY[fi(i + 1, j)] + FY[fi(i, j - 1)] + FY[fi(i, j + 1)]) * 0.25 - FY[k];
+        FXn[k] = (FX[k] + lx * visc) * decay;
+        FYn[k] = (FY[k] + ly * visc) * decay;
+      }
+    }
+    const carry = P.carry;
+    const confine = P.confine;
+    for (let j = 1; j < fRows - 1; j++) {
+      for (let i = 1; i < fCols - 1; i++) {
+        const k = fi(i, j);
+        const px = (i + 0.5) * fCell - FXn[k] * carry * dt;
+        const py = (j + 0.5) * fCell - FYn[k] * carry * dt;
+        const s = sampleFlow(px, py, FXn, FYn);
+        let vx = s.fx, vy = s.fy;
+        const w = curlAt(i, j, FXn, FYn);
+        const we = Math.abs(curlAt(i + 1, j, FXn, FYn));
+        const ww = Math.abs(curlAt(i - 1, j, FXn, FYn));
+        const ws = Math.abs(curlAt(i, j + 1, FXn, FYn));
+        const wn = Math.abs(curlAt(i, j - 1, FXn, FYn));
+        const dwx = we - ww, dwy = ws - wn;
+        const gl = Math.hypot(dwx, dwy) + 1e-5;
+        vx += -dwy / gl * w * confine;
+        vy +=  dwx / gl * w * confine;
+        const spd = Math.hypot(vx, vy);
+        const cap = P.cap * (0.85 + 0.35 * Math.min(2, influenceT()));
+        if (spd > cap) { vx *= cap / spd; vy *= cap / spd; }
+        FX[k] = vx;
+        FY[k] = vy;
+      }
+    }
+  }
+
+  function at(i, j) {
+    if (i < 0 || j < 0 || i >= cols || j >= rows) return null;
+    return hairs[j * cols + i];
+  }
+
+  function isPhone() {
+    return W < 640 || (W <= 900 && H / W > 1.25);
+  }
+
+  function plant() {
+    const phone = isPhone();
+    cols = Math.max(14, Math.round(W / (phone ? 17 : 26)));
+    rows = Math.max(10, Math.round(H / (phone ? 32 : 46)));
+    hairs = [];
+    const top = H * (phone ? 0.07 : 0.12);
+    const bot = H * 0.97;
+    const lenBase = phone ? 34 : 26;
+    const lenSpan = phone ? 64 : 52;
+    for (let j = 0; j < rows; j++) {
+      for (let i = 0; i < cols; i++) {
+        const skip = Math.random() < (phone ? 0.04 : 0.07);
+        const u = (i + 0.5 + (j % 2) * 0.48) / cols;
+        const v = j / (rows - 1 || 1);
+        const x = u * W + (Math.random() - 0.5) * (phone ? 6 : 9);
+        const y = top + v * (bot - top) + (Math.random() - 0.5) * (phone ? 7 : 10);
+        const near = 0.35 + v * 0.65;
+        const len = (lenBase + (1 - v) * lenSpan) * (0.84 + Math.random() * 0.32);
+        const rest = -Math.PI / 2 + (Math.random() - 0.5) * 0.12;
+        hairs.push(skip ? null : {
+          i, j, x, y, len, near, rest,
+          a:  Array.from({ length: SEG }, () => rest),
+          va: Array.from({ length: SEG }, () => 0),
+          pts: Array.from({ length: SEG + 1 }, () => ({ x, y })),
+          ph: Math.random() * Math.PI * 2,
+          hue: 140 + Math.random() * 12 + v * 8,
+          w: (phone ? 0.95 : 0.85) + Math.random() * 0.55,
+          bentFlag: false,
+          curve: 0,
+        });
+      }
+    }
+    rays = Array.from({ length: 4 }, (_, k) => ({
+      x: W * (0.18 + k * 0.2),
+      w: W * (0.035 + (k % 2) * 0.02),
+      tilt: (k - 1.4) * 0.07,
+      spd: 0.07 + k * 0.018,
+      ph: k * 1.3,
+    }));
+    motesIdle = Array.from({ length: phone ? 22 : 18 }, () => ({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: 0.4 + Math.random() * 0.9,
+      vy: -(3.5 + Math.random() * 7),
+      ph: Math.random() * Math.PI * 2,
+    }));
+    initFlow();
+  }
+
+  function addGust(x, y, pvx, pvy, dt) {
+    const spd = Math.hypot(pvx, pvy);
+    if (spd < 40) return;
+    let vx = pvx, vy = pvy;
+    const capPx = 2200;
+    if (spd > capPx) { vx *= capPx / spd; vy *= capPx / spd; }
+    // Paddle drag: water accelerates toward the oar. Ride a current and
+    // you barely add; cut across it and you kink what's already there.
+    const t = influenceT();
+    const wantX = vx * (0.0012 + t * 0.00105);
+    const wantY = vy * (0.0012 + t * 0.00105);
+    const w = FX ? sampleFlow(x, y) : { fx: 0, fy: 0 };
+    const k = (1 - Math.exp(-dt / mode.dragTau)) * (0.7 + t * 0.9);
+    const dvx = (wantX - w.fx) * k;
+    const dvy = (wantY - w.fy) * k;
+    stampFlow(x, y, dvx, dvy);
+    lastActive = clock;
+    const dmag = Math.hypot(dvx, dvy);
+    if (dmag > 0.08 && gusts.length < 14) {
+      gusts.push({ x, y, vx: dvx * 8, vy: dvy * 8, life: 1.2 });
+    }
+    if (dmag > 0.12 && motes.length < 50) {
+      motes.push({
+        x, y,
+        vx: dvx * 28 + (Math.random() - 0.5) * 4,
+        vy: dvy * 22 - 6 - Math.random() * 5,
+        life: 0.9 + Math.random() * 0.5,
+        max: 1.2,
+      });
+    }
+  }
+
+  function spawnIdleSwell() {
+    const edge = Math.floor(Math.random() * 4);
+    let x, y, nx, ny;
+    if (edge === 0) { x = Math.random() * W; y = -20; nx = (Math.random() - 0.5) * 0.4; ny = 1; }
+    else if (edge === 1) { x = W + 20; y = Math.random() * H; nx = -1; ny = (Math.random() - 0.5) * 0.4; }
+    else if (edge === 2) { x = Math.random() * W; y = H + 20; nx = (Math.random() - 0.5) * 0.4; ny = -1; }
+    else { x = -20; y = Math.random() * H; nx = 1; ny = (Math.random() - 0.5) * 0.4; }
+    const n = Math.hypot(nx, ny) || 1;
+    swells.push({
+      x, y,
+      nx: nx / n, ny: ny / n,
+      speed: 88 + Math.random() * 52,
+      life: 1,
+      span: Math.min(W, H) * (0.18 + Math.random() * 0.10),
+      amp: 0.04 + Math.random() * 0.03,
+    });
+    if (swells.length > 3) swells.shift();
+  }
+
+  function stampSwell(S, dt) {
+    if (!FX) return;
+    const mag = S.amp * Math.max(0, S.life);
+    const span = S.span;
+    const sigAlong  = span / fCell * 0.38;
+    const sigAcross = span / fCell * 0.72;
+    const rad = Math.max(sigAlong, sigAcross) * 2.4;
+    const r2 = rad * rad;
+    const cx = S.x / fCell, cy = S.y / fCell;
+    const i0 = Math.max(1, Math.floor(cx - rad));
+    const i1 = Math.min(fCols - 2, Math.ceil(cx + rad));
+    const j0 = Math.max(1, Math.floor(cy - rad));
+    const j1 = Math.min(fRows - 2, Math.ceil(cy + rad));
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const dx = i - cx, dy = j - cy;
+        if (dx * dx + dy * dy > r2) continue;
+        const along  = dx * S.nx + dy * S.ny;
+        const across = -dx * S.ny + dy * S.nx;
+        const g = Math.exp(-0.5 * (along * along / (sigAlong * sigAlong) + across * across / (sigAcross * sigAcross)));
+        const k = fi(i, j);
+        FX[k] += S.nx * mag * g;
+        FY[k] += S.ny * mag * g;
+      }
+    }
+    S.x += S.nx * S.speed * dt;
+    S.y += S.ny * S.speed * dt;
+    S.life -= dt * 0.62;
+  }
+
+  function idleSince() {
+    return pointers.size ? 0 : Math.max(0, clock - lastActive);
+  }
+
+  let combR = 0;
+
+  function combSpanPx() {
+    return Math.min(W, H) * mode.combSpan * (0.9 + 0.08 * Math.min(2, influenceT()));
+  }
+
+  function pushComb(x, y, vx, vy) {
+    const spd = Math.hypot(vx, vy);
+    const last = combs[combs.length - 1];
+    if (last) {
+      const dx = x - last.x, dy = y - last.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < 4) {
+        last.x = x; last.y = y; last.vx = vx; last.vy = vy;
+        last.spd = spd; last.life = 1;
+        return;
+      }
+      // Leave teeth behind — do not drag the last one with the finger.
+      if (d2 < 100) return;
+    }
+    combs.push({ x, y, vx, vy, spd, life: 1 });
+    if (combs.length > 26) combs.shift();
+  }
+
+  function stepCombs(dt) {
+    combR = combSpanPx();
+    for (const p of pointers.values()) {
+      pushComb(p.x, p.y, p.vx || 0, p.vy || 0);
+    }
+    for (let i = combs.length; i--;) {
+      combs[i].life -= dt / 0.55;
+      if (combs[i].life <= 0) combs.splice(i, 1);
+    }
+  }
+
+  function hairInComb(h) {
+    if (!combs.length) return false;
+    const reach = combR + h.len + 10;
+    const r2 = reach * reach;
+    for (const C of combs) {
+      const dx = h.x - C.x, dy = h.y - C.y;
+      if (dx * dx + dy * dy < r2) return true;
+    }
+    return false;
+  }
+
+  // Local tooth through the meadow — parts blades along the stroke, independent of the wide paddle.
+  function combAt(mx, my) {
+    if (!combs.length) return { px: 0, py: 0, w: 0 };
+    const R = combR || combSpanPx();
+    const R2 = R * R * 2.6;
+    let px = 0, py = 0, w = 0;
+    for (const C of combs) {
+      const dx = mx - C.x, dy = my - C.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > R2) continue;
+      const g = Math.exp(-d2 / (R * R * 0.5)) * Math.max(0, C.life);
+      if (g < 0.03) continue;
+      if (C.spd > 48) {
+        const inv = 1 / C.spd;
+        const nx = C.vx * inv, ny = C.vy * inv;
+        const across = -dx * ny + dy * nx;
+        const part = Math.min(1, Math.abs(across) / (R * 0.28));
+        const side = across >= 0 ? 1 : -1;
+        // On the tooth: flatten along the stroke. On the shoulders: part aside.
+        px += (nx * (0.9 - 0.3 * part) + -ny * side * (0.2 + 0.92 * part)) * g;
+        py += (ny * (0.9 - 0.3 * part) +  nx * side * (0.2 + 0.92 * part)) * g;
+      } else {
+        const d = Math.sqrt(d2) + 1e-4;
+        px += (dx / d) * g;
+        py += (dy / d) * g;
+      }
+      w += g;
+    }
+    if (w < 0.04) return { px: 0, py: 0, w: 0 };
+    return { px: px / w, py: py / w, w: Math.min(1.8, w) };
+  }
+
+  function sampleCurrent(x, y) {
+    const f = sampleFlow(x, y);
+    const idleX = Math.sin(clock * 0.11 + y * 0.008) * 0.03;
+    const idleY = Math.cos(clock * 0.09 + x * 0.006) * 0.015;
+    return { fx: f.fx + idleX, fy: f.fy + idleY };
+  }
+
+  function update(dt) {
+    clock += dt;
+
+    const idle = idleSince();
+    let settle = 0;
+    if (idle >= IDLE_WAVE && FX) {
+      settle = Math.min(1, (idle - IDLE_WAVE) / (IDLE_SETTLE - IDLE_WAVE));
+      settle = settle * (2 - settle);
+      const k = 0.018 + 0.055 * settle;
+      const fade = Math.pow(1 - k, dt * 60);
+      for (let i = 0; i < FX.length; i++) { FX[i] *= fade; FY[i] *= fade; }
+      if (!idleWaved) {
+        spawnIdleSwell();
+        idleWaved = true;
+      }
+      if (settle > 0.7) {
+        for (const S of swells) S.life = Math.min(S.life, 0.12);
+      }
+    } else if (idle < 0.2) {
+      idleWaved = false;
+      nextSplashAt = clock + IDLE_WAVE;
+    }
+
+    if (FX) stepFlow(dt);
+    stepCombs(dt);
+
+    for (let s = swells.length; s--;) {
+      const S = swells[s];
+      stampSwell(S, dt);
+      if (S.life <= 0 || S.x < -80 || S.y < -80 || S.x > W + 80 || S.y > H + 80) {
+        swells.splice(s, 1);
+      }
+    }
+
+    for (let g = gusts.length; g--;) {
+      const G = gusts[g];
+      G.life -= dt * 0.55;
+      G.x += G.vx * dt * 22;
+      G.y += G.vy * dt * 22;
+      G.vx *= 0.992; G.vy *= 0.992;
+      if (G.life <= 0) gusts.splice(g, 1);
+    }
+    for (let m = motes.length; m--;) {
+      const p = motes[m];
+      p.life -= dt * 0.7;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if (FX) {
+        const fl = sampleFlow(p.x, p.y);
+        p.vx += fl.fx * 10;
+        p.vy += fl.fy * 10;
+      }
+      p.vy -= 14 * dt;
+      p.vx *= 0.97; p.vy *= 0.97;
+      if (p.life <= 0) motes.splice(m, 1);
+    }
+    for (const b of motesIdle) {
+      b.y += b.vy * dt;
+      b.x += Math.sin(clock * 0.4 + b.ph) * 8 * dt;
+      if (b.y < -8) { b.y = H + 6; b.x = Math.random() * W; }
+    }
+
+    let bentSum = 0, bentN = 0;
+    const follow = mode.follow * (1 - settle * 0.95);
+    const neighborK = mode.neighbor * (1 - settle * 0.7);
+    const spring = mode.spring * (1 + settle * 2.8);
+    const damp = mode.damp * (1 - settle * 0.22);
+    const maxRel0 = mode.maxRel;
+    for (const h of hairs) {
+      if (!h) continue;
+      const tide = Math.sin(clock * 0.24) * 0.07 + Math.sin(clock * 0.07) * 0.03;
+      const segLen = h.len / SEG;
+      let px = h.x, py = h.y;
+      h.pts[0].x = px; h.pts[0].y = py;
+      let curve = 0;
+      const inComb = hairInComb(h);
+
+      for (let s = 0; s < SEG; s++) {
+        const along = (s + 0.55) / SEG;
+        const parent = s === 0 ? h.rest : h.a[s - 1];
+        const wave = Math.sin(clock * 0.28 + h.ph + s * 0.95) * (0.012 + along * 0.028)
+                   + Math.sin(clock * 0.11 + h.ph * 1.35 + s * 0.5) * (0.006 + along * 0.014);
+        let target = parent + wave;
+        if (s === 0) target += tide * (0.12 + h.near * 0.22);
+
+        const mx = px + Math.cos(h.a[s]) * segLen * 0.5;
+        const my = py + Math.sin(h.a[s]) * segLen * 0.5;
+        const { fx, fy } = sampleCurrent(mx, my);
+        const comb = inComb ? combAt(mx, my) : { px: 0, py: 0, w: 0 };
+        const combW = comb.w;
+        const tx = Math.cos(h.a[s]), ty = Math.sin(h.a[s]);
+        // Planted cantilever: current bows the stalk downstream.
+        // Comb is a separate local tooth — it parts the grass, the wake does not.
+        const plant = 1 - along * 0.82;
+        const hold = 1 - Math.min(0.72, combW * 0.75);
+        let torque = (target - h.a[s]) * spring * (0.35 + plant * 0.85) * hold;
+        torque += (tx * fy - ty * fx) * (22 + along * 58) * follow * (1 - Math.min(0.6, combW * 0.55));
+        if (combW > 0.04) {
+          const align = tx * comb.py - ty * comb.px;
+          torque += align * mode.comb * (70 + along * 110) * (0.6 + along * 1.25);
+        }
+
+        if (s === 0) {
+          const L = at(h.i - 1, h.j), R = at(h.i + 1, h.j);
+          const U = at(h.i, h.j - 1), D = at(h.i, h.j + 1);
+          let ns = 0, na = 0;
+          if (L) { ns++; na += L.a[0]; }
+          if (R) { ns++; na += R.a[0]; }
+          if (U) { ns++; na += U.a[0]; }
+          if (D) { ns++; na += D.a[0]; }
+          if (ns) torque += (na / ns - h.a[0]) * neighborK * hold;
+        }
+
+        h.va[s] += torque * dt;
+        h.va[s] *= Math.pow(damp + along * 0.10, dt * 60);
+        if (h.va[s] >  2.6) h.va[s] =  2.6;
+        if (h.va[s] < -2.6) h.va[s] = -2.6;
+        h.a[s] += h.va[s] * dt;
+        if (settle > 0) {
+          const home = settle * settle;
+          h.a[s] += (target - h.a[s]) * home * (1 - Math.exp(-dt / 0.12));
+          h.va[s] *= 1 - home * 0.55;
+        }
+
+        const maxRel = maxRel0 + along * 0.62 + Math.min(0.5, combW * 0.48);
+        if (h.a[s] < parent - maxRel) { h.a[s] = parent - maxRel; h.va[s] *= 0.22; }
+        if (h.a[s] > parent + maxRel) { h.a[s] = parent + maxRel; h.va[s] *= 0.22; }
+
+        curve += Math.abs(h.a[s] - parent);
+        px += Math.cos(h.a[s]) * segLen;
+        py += Math.sin(h.a[s]) * segLen;
+        h.pts[s + 1].x = px;
+        h.pts[s + 1].y = py;
+      }
+
+      h.curve = curve;
+      bentSum += curve; bentN++;
+      if (curve > 0.55 && !h.bentFlag) {
+        h.bentFlag = true;
+        if (clock - lastPluckAt > 0.08) {
+          const midi = Audio.noteFromY(h.y, H, currentScale, 2, 62);
+          playPluck(midi, 0.034 + Math.min(0.05, curve * 0.05));
+          lastPluckAt = clock;
+        }
+      } else if (curve < 0.22) {
+        h.bentFlag = false;
+      }
+    }
+
+    const avg = bentN ? bentSum / bentN : 0;
+    bentSmoothed += (avg - bentSmoothed) * (1 - Math.exp(-dt / 0.2));
+    if (drone && audioCtx) {
+      const now = audioCtx.currentTime;
+      const open = Math.min(1, bentSmoothed / 0.52);
+      drone.filt.frequency.setTargetAtTime(180 + open * 1400, now, 0.14);
+      drone.g.gain.setTargetAtTime(0.008 + open * 0.07, now, 0.16);
+      drone.oscA.frequency.setTargetAtTime(92 + open * 22, now, 0.22);
+      drone.oscB.frequency.setTargetAtTime(138 + open * 34, now, 0.22);
+      drone.oscC.frequency.setTargetAtTime(184 + open * 48, now, 0.22);
+    }
+  }
+
+  function draw() {
+    ctx.fillStyle = 'rgba(4, 16, 18, 0.20)';
+    ctx.fillRect(0, 0, W, H);
+
+    const depth = ctx.createLinearGradient(0, 0, 0, H);
+    depth.addColorStop(0, 'rgba(38, 78, 82, 0.11)');
+    depth.addColorStop(0.38, 'rgba(12, 42, 44, 0.05)');
+    depth.addColorStop(1, 'rgba(4, 12, 12, 0.18)');
+    ctx.fillStyle = depth;
+    ctx.fillRect(0, 0, W, H);
+
+    const sky = ctx.createLinearGradient(0, 0, 0, H * 0.28);
+    sky.addColorStop(0, 'rgba(92, 148, 142, 0.10)');
+    sky.addColorStop(1, 'rgba(92, 148, 142, 0)');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H * 0.28);
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const r of rays) {
+      const ox = Math.sin(clock * r.spd + r.ph) * W * 0.035;
+      const x0 = r.x + ox;
+      const x1 = x0 + r.tilt * H;
+      const grd = ctx.createLinearGradient(x0, 0, x1, H);
+      grd.addColorStop(0, 'rgba(118, 168, 152, 0.07)');
+      grd.addColorStop(0.42, 'rgba(70, 128, 118, 0.025)');
+      grd.addColorStop(1, 'rgba(40, 80, 72, 0)');
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.moveTo(x0 - r.w, 0);
+      ctx.lineTo(x0 + r.w, 0);
+      ctx.lineTo(x1 + r.w * 1.6, H);
+      ctx.lineTo(x1 - r.w * 1.6, H);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    for (const S of swells) {
+      const u = Math.max(0, S.life);
+      if (u < 0.04) continue;
+      const px = -S.ny, py = S.nx;
+      const half = S.span * 1.2;
+      ctx.beginPath();
+      for (let i = 0; i <= 20; i++) {
+        const t = i / 20 * 2 - 1;
+        const env = 1 - t * t;
+        const wobble = Math.sin(t * 5.2 + clock * 2.4) * 7 * env;
+        const x = S.x + px * t * half + S.nx * wobble;
+        const y = S.y + py * t * half + S.ny * wobble;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = `rgba(140, 196, 186, ${0.09 * u})`;
+      ctx.lineWidth = 16;
+      ctx.stroke();
+      ctx.strokeStyle = `rgba(210, 232, 220, ${0.14 * u})`;
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    const bed = ctx.createLinearGradient(0, H * 0.72, 0, H);
+    bed.addColorStop(0, 'rgba(3, 8, 8, 0)');
+    bed.addColorStop(1, 'rgba(2, 6, 6, 0.28)');
+    ctx.fillStyle = bed;
+    ctx.fillRect(0, H * 0.72, W, H * 0.28);
+
+    const vig = ctx.createRadialGradient(W * 0.5, H * 0.4, Math.min(W, H) * 0.18, W * 0.5, H * 0.52, Math.hypot(W, H) * 0.58);
+    vig.addColorStop(0, 'rgba(0,0,0,0)');
+    vig.addColorStop(1, 'rgba(2, 8, 8, 0.18)');
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, W, H);
+
+    for (const b of motesIdle) {
+      const a = 0.04 + 0.05 * Math.sin(clock * 0.55 + b.ph);
+      ctx.fillStyle = `rgba(168, 196, 178, ${a})`;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    for (const p of motes) {
+      const u = Math.max(0, p.life / (p.max || 1));
+      ctx.globalAlpha = u * 0.22;
+      ctx.fillStyle = 'rgba(196, 216, 198, 1)';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 0.9 * u, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (const h of hairs) {
+      if (!h) continue;
+      const p = h.pts;
+      const bend = h.curve;
+      const lum = 0.13 + h.near * 0.26 + Math.min(0.18, bend * 0.14);
+      const path = new Path2D();
+      path.moveTo(p[0].x, p[0].y);
+      for (let i = 1; i < p.length - 1; i++) {
+        const mx = (p[i].x + p[i + 1].x) * 0.5;
+        const my = (p[i].y + p[i + 1].y) * 0.5;
+        path.quadraticCurveTo(p[i].x, p[i].y, mx, my);
+      }
+      const last = p[p.length - 1];
+      path.lineTo(last.x, last.y);
+
+      const sat = 32 + h.near * 16;
+      const light = 34 + h.near * 16 + Math.min(10, bend * 7);
+      ctx.strokeStyle = `hsla(${h.hue},${sat}%,${light}%,${lum})`;
+      ctx.lineWidth = h.w * 1.18 + Math.min(0.3, bend * 0.14);
+      ctx.stroke(path);
+      ctx.strokeStyle = `hsla(${h.hue + 6},${sat + 8}%,${light + 12}%,${lum * 0.32})`;
+      ctx.lineWidth = Math.max(0.4, h.w * 0.38);
+      ctx.stroke(path);
+
+      if (bend > 0.7) {
+        const gl = Math.min(0.4, (bend - 0.7) * 0.7);
+        ctx.fillStyle = `hsla(${h.hue + 10},48%,72%,${gl * 0.45})`;
+        ctx.beginPath();
+        ctx.arc(last.x, last.y, 0.7 + bend * 0.12, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  function setupInput() {
+    canvas.addEventListener('pointerdown', e => {
+      try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+      const r = canvas.getBoundingClientRect();
+      pointers.set(e.pointerId, { x: e.clientX - r.left, y: e.clientY - r.top, t: performance.now(), vx: 0, vy: 0 });
+      lastActive = clock;
+      pushComb(e.clientX - r.left, e.clientY - r.top, 0, 0);
+    });
+    canvas.addEventListener('pointermove', e => {
+      const p = pointers.get(e.pointerId);
+      if (!p) return;
+      const r = canvas.getBoundingClientRect();
+      const x = e.clientX - r.left, y = e.clientY - r.top;
+      const now = performance.now();
+      const dt = Math.max(0.008, Math.min(0.05, (now - p.t) / 1000));
+      const vx = (x - p.x) / dt, vy = (y - p.y) / dt;
+      addGust(x, y, vx, vy, dt);
+      p.x = x; p.y = y; p.t = now; p.vx = vx; p.vy = vy;
+    });
+    const up = e => {
+      pointers.delete(e.pointerId);
+      if (!pointers.size) lastActive = clock;
+    };
+    canvas.addEventListener('pointerup', up);
+    canvas.addEventListener('pointercancel', up);
+
+    window.addEventListener('keydown', e => {
+      if (e.key >= '1' && e.key <= '5') {
+        currentScale = ['gamelan', 'pentatonic', 'wholeTone', 'major', 'minor'][+e.key - 1];
+      }
+    });
+  }
+
+  function loop(ts) {
+    if (!t0) t0 = ts;
+    const dt = Math.min((ts - t0) / 1000, 0.05);
+    t0 = ts;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  function begin(e) {
+    try { initAudio(); } catch (_) {}
+    setupCanvas();
+    plant();
+    setupInput();
+    window.addEventListener('resize', () => { setupCanvas(); plant(); });
+    const r = canvas.getBoundingClientRect();
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+    pointers.set(e.pointerId, { x: e.clientX - r.left, y: e.clientY - r.top, t: performance.now(), vx: 0, vy: 0 });
+    const beginEl = document.getElementById('begin');
+    beginEl.style.opacity = '0';
+    setTimeout(() => beginEl.remove(), 700);
+    requestAnimationFrame(loop);
+  }
+
+  canvas.addEventListener('pointerdown', begin, { once: true });
+  </script>
+</body>
+</html>

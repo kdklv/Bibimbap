@@ -60,7 +60,7 @@
     .card-tracy     { grid-column: 1; grid-row: 2; }
     .card-slosh     { grid-column: 2; grid-row: 2; }
     .card-nanocarp  { grid-column: 1; grid-row: 3; }
-    .card-soon      { grid-column: 2; grid-row: 3; }
+    .card-cilia     { grid-column: 2; grid-row: 3; }
 
     .card-label {
       position: absolute;
@@ -74,14 +74,26 @@
       z-index: 1;
     }
 
-    a.card.soon { pointer-events: none; }
-    a.card.soon .card-label { color: rgba(232,234,240,0.2); }
+    h1 a.gem {
+      color: inherit;
+      text-decoration: none;
+      cursor: default;
+    }
+    h1 a.gem:hover,
+    h1 a.gem:focus-visible {
+      color: rgba(196, 170, 255, 0.55);
+      cursor: pointer;
+    }
+    h1 a.gem:focus-visible {
+      outline: 1px solid rgba(196, 170, 255, 0.45);
+      outline-offset: 4px;
+    }
   </style>
 </head>
 <body>
 <div class="page">
   <div class="wrap">
-    <h1>plankton</h1>
+    <h1>plankto<a class="gem" href="irid/" aria-label="irid">n</a></h1>
     <div class="bento">
       <a class="card card-luminaria" href="luminaria/">
         <canvas id="cv-l"></canvas>
@@ -103,9 +115,9 @@
         <canvas id="cv-n"></canvas>
         <span class="card-label">nanocarp</span>
       </a>
-      <a class="card card-soon soon" href="#" tabindex="-1" aria-disabled="true">
+      <a class="card card-cilia" href="cilia/">
         <canvas id="cv-x"></canvas>
-        <span class="card-label">soon</span>
+        <span class="card-label">cilia</span>
       </a>
     </div>
   </div>
@@ -136,8 +148,8 @@ function initCanvas(id) {
 //   hanenbow-bottom(6)  ↔ slosh-top(6)
 //   tracy-right(8)      ↔ slosh-left(8)
 //   tracy-bottom(6)     ↔ nanocarp-top(6)
-//   slosh-bottom(6)     ↔ soon-top(6)
-//   nanocarp-right(8)   ↔ soon-left(8)
+//   slosh-bottom(6)     ↔ cilia-top(6)
+//   nanocarp-right(8)   ↔ cilia-left(8)
 
 const STONE_DEFS = {
   'card-luminaria': { corners: {tl:22, tr:8,  br:8,  bl:10}, bows: {top:3, right:8,  bottom:6, left:3}  },
@@ -145,7 +157,7 @@ const STONE_DEFS = {
   'card-tracy':     { corners: {tl:10, tr:8,  br:8,  bl:22}, bows: {top:6, right:8,  bottom:6, left:3}  },
   'card-slosh':     { corners: {tl:8,  tr:22, br:10, bl:8 }, bows: {top:6, right:3,  bottom:6, left:8}  },
   'card-nanocarp':  { corners: {tl:10, tr:8,  br:22, bl:10}, bows: {top:6, right:8,  bottom:3, left:3}  },
-  'card-soon':      { corners: {tl:8,  tr:22, br:22, bl:8 }, bows: {top:6, right:3,  bottom:3, left:8}  },
+  'card-cilia':     { corners: {tl:8,  tr:22, br:22, bl:8 }, bows: {top:6, right:3,  bottom:3, left:8}  },
 };
 
 function stonePath(W, H, {tl, tr, br, bl}, {top, right, bottom, left}) {
@@ -203,7 +215,7 @@ window.addEventListener('load', () => requestAnimationFrame(() => {
   animTracy    (T.ctx,  T.W,  T.H);
   animSlosh    (S.ctx,  S.W,  S.H);
   animNanocarp (N.ctx,  N.W,  N.H);
-  animSoon     (X.ctx,  X.W,  X.H);
+  animCilia    (X.ctx,  X.W,  X.H);
 }));
 
 // ── Luminaria – arrow grid + drifting plankton ───────────────────────────────
@@ -477,22 +489,22 @@ function animTracy(ctx, W, H) {
   (function loop() { draw(); requestAnimationFrame(loop); })();
 }
 
-// ── Slosh – wobbly membrane + drifting nuclei ────────────────────────────────
+// ── Slosh – gel body + wandering dimple + drifting nuclei ────────────────────
 function animSlosh(ctx, W, H) {
   const cx = W * 0.5, cy = H * 0.52;
   const baseR = Math.min(W, H) * 0.34;
-  const hues = [30, 90, 170, 240, 300];
+  const hues = [28, 92, 168, 248, 308];
   const nuclei = hues.map((hue, i) => ({
     hue,
     a: (i / hues.length) * Math.PI * 2,
-    r: 2.2 + (4 - i) * 0.35,
-    spd: 0.007 + i * 0.0012,
-    orbit: baseR * (0.22 + i * 0.08),
+    r: 2.0 + (4 - i) * 0.32,
+    spd: 0.006 + i * 0.001,
+    orbit: baseR * (0.20 + i * 0.075),
   }));
   let t = 0;
 
   function blobPoint(a, wobble) {
-    const r = baseR + Math.sin(a * 3 + t * 0.7) * 3 + Math.cos(a * 5 - t * 0.5) * 1.8 + wobble;
+    const r = baseR + Math.sin(a * 3 + t * 0.55) * 2.6 + Math.cos(a * 5 - t * 0.38) * 1.5 + wobble;
     return { x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r };
   }
 
@@ -500,29 +512,59 @@ function animSlosh(ctx, W, H) {
     ctx.fillStyle = 'rgba(8,12,20,0.22)';
     ctx.fillRect(0, 0, W, H);
 
-    t += 0.018;
+    t += 0.016;
     const n = 36;
     ctx.beginPath();
     for (let i = 0; i <= n; i++) {
       const a = (i / n) * Math.PI * 2;
-      const p = blobPoint(a, Math.sin(t + i * 0.35) * 1.5);
+      const p = blobPoint(a, Math.sin(t + i * 0.35) * 1.2);
       if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
     }
     ctx.closePath();
-    ctx.fillStyle = 'rgba(160,196,255,0.06)';
+    ctx.fillStyle = 'rgba(18, 36, 52, 0.72)';
     ctx.fill();
-    ctx.strokeStyle = 'rgba(232,234,240,0.42)';
-    ctx.lineWidth = 1.2;
+    ctx.save();
+    ctx.clip();
+    const body = ctx.createRadialGradient(cx - baseR * 0.18, cy - baseR * 0.24, 4, cx, cy, baseR * 1.05);
+    body.addColorStop(0, 'hsla(198, 46%, 32%, 0.55)');
+    body.addColorStop(0.55, 'hsla(210, 40%, 16%, 0.50)');
+    body.addColorStop(1, 'hsla(220, 36%, 10%, 0.70)');
+    ctx.fillStyle = body;
+    ctx.fill();
+
+    const da = t * 0.35;
+    const dx = cx + Math.cos(da) * baseR * 0.28;
+    const dy = cy + Math.sin(da * 1.15) * baseR * 0.22;
+    const well = ctx.createRadialGradient(dx, dy, 0, dx, dy, baseR * 0.38);
+    well.addColorStop(0, 'rgba(4, 10, 18, 0.42)');
+    well.addColorStop(0.55, 'hsla(210, 60%, 48%, 0.10)');
+    well.addColorStop(0.82, 'hsla(220, 70%, 70%, 0.12)');
+    well.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = well;
+    ctx.beginPath();
+    ctx.arc(dx, dy, baseR * 0.38, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      const p = blobPoint(a, Math.sin(t + i * 0.35) * 1.2);
+      if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+    }
+    ctx.closePath();
+    ctx.strokeStyle = 'rgba(210, 220, 240, 0.38)';
+    ctx.lineWidth = 1.15;
     ctx.stroke();
 
     for (const nuc of nuclei) {
       nuc.a += nuc.spd;
       const px = cx + Math.cos(nuc.a) * nuc.orbit;
-      const py = cy + Math.sin(nuc.a * 1.15) * nuc.orbit * 0.82 + Math.sin(t * 2 + nuc.hue) * 2;
+      const py = cy + Math.sin(nuc.a * 1.15) * nuc.orbit * 0.82 + Math.sin(t * 1.6 + nuc.hue) * 1.6;
       ctx.save();
-      ctx.shadowBlur = nuc.r > 2.8 ? 10 : 6;
-      ctx.shadowColor = `hsla(${nuc.hue},85%,65%,0.55)`;
-      ctx.fillStyle = `hsla(${nuc.hue},85%,68%,0.82)`;
+      ctx.shadowBlur = nuc.r > 2.6 ? 8 : 5;
+      ctx.shadowColor = `hsla(${nuc.hue},80%,62%,0.48)`;
+      ctx.fillStyle = `hsla(${nuc.hue},82%,66%,0.78)`;
       ctx.beginPath();
       ctx.arc(px, py, nuc.r, 0, Math.PI * 2);
       ctx.fill();
@@ -533,21 +575,46 @@ function animSlosh(ctx, W, H) {
   (function loop() { draw(); requestAnimationFrame(loop); })();
 }
 
-// ── Soon – idle placeholder pulse ────────────────────────────────────────────
-function animSoon(ctx, W, H) {
+// ── Cilia – tidal meadow ─────────────────────────────────────────────────────
+function animCilia(ctx, W, H) {
+  const cols = 11, rows = 6;
+  const hairs = [];
+  for (let j = 0; j < rows; j++) {
+    for (let i = 0; i < cols; i++) {
+      const u = (i + 0.5 + (j % 2) * 0.45) / cols;
+      const v = j / (rows - 1);
+      hairs.push({
+        x: u * W,
+        y: H * 0.22 + v * H * 0.68,
+        len: 10 + (1 - v) * 14,
+        ph: Math.random() * Math.PI * 2,
+        hue: 172 + Math.random() * 16,
+      });
+    }
+  }
   let t = 0;
   function draw() {
-    ctx.fillStyle = 'rgba(8,12,20,0.35)';
+    ctx.fillStyle = 'rgba(6,16,24,0.22)';
     ctx.fillRect(0, 0, W, H);
-    t += 0.02;
-    const pulse = 0.5 + Math.sin(t) * 0.5;
-    const cx = W * 0.5, cy = H * 0.5;
-    ctx.strokeStyle = `rgba(160,196,255,${0.04 + pulse * 0.06})`;
-    ctx.lineWidth = 1;
-    for (let i = 0; i < 3; i++) {
-      const r = 12 + i * 14 + pulse * 6;
+    t += 0.012;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (const h of hairs) {
+      let x = h.x, y = h.y;
       ctx.beginPath();
-      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.moveTo(x, y);
+      for (let s = 0; s < 4; s++) {
+        const a = -Math.PI / 2
+          + Math.sin(t * 0.45 + h.ph + s * 0.9) * (0.18 + s * 0.12)
+          + Math.sin(t * 0.18 + h.ph * 1.3) * 0.08;
+        const sl = h.len / 4;
+        const nx = x + Math.cos(a) * sl;
+        const ny = y + Math.sin(a) * sl;
+        ctx.quadraticCurveTo(x + Math.cos(a) * sl * 0.5, y + Math.sin(a) * sl * 0.5, nx, ny);
+        x = nx; y = ny;
+      }
+      ctx.strokeStyle = `hsla(${h.hue},46%,62%,0.40)`;
+      ctx.lineWidth = 1.05;
       ctx.stroke();
     }
   }

@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>lanterns</title>
+  <link rel="stylesheet" href="../shared/theme.css">
+  <style>
+    .begin-screen { flex-direction: column; gap: 10px; }
+    .begin-screen .name { font-size: 30px; letter-spacing: 0.22em; color: rgba(232,234,240,0.88); }
+    .begin-screen .hint { font-size: 12px; letter-spacing: 0.06em; color: rgba(232,234,240,0.32); }
+    .back {
+      position: fixed; top: 16px; left: 18px; z-index: 2;
+      font: 400 10px/1 system-ui; letter-spacing: 0.2em; text-transform: lowercase;
+      color: rgba(232,234,240,0.28); text-decoration: none;
+    }
+    .back:hover { color: rgba(232,234,240,0.5); }
+  </style>
+</head>
+<body>
+  <a class="back" href="../soon/">trials</a>
+  <canvas id="canvas"></canvas>
+  <div class="begin-screen" id="begin">
+    <div class="name">lanterns</div>
+    <div>touch to begin</div>
+    <div class="hint">tap a bell to slip its beat</div>
+  </div>
+  <script src="../shared/audio.js"></script>
+  <script>
+  'use strict';
+
+  const canvas = document.getElementById('canvas');
+  let ctx, W, H, t0 = 0;
+
+  function setupCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    W = rect.width; H = rect.height;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+  }
+
+  let audioCtx, masterGain, reverbNode, voices = 0;
+
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    audioCtx.resume();
+    const warmth = audioCtx.createBiquadFilter();
+    warmth.type = 'lowpass'; warmth.frequency.value = 3800; warmth.Q.value = 0.45;
+    warmth.connect(audioCtx.destination);
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.32;
+    masterGain.connect(warmth);
+    const sr = audioCtx.sampleRate, len = Math.floor(sr * 2.1);
+    const buf = audioCtx.createBuffer(2, len, sr);
+    for (let c = 0; c < 2; c++) {
+      const ch = buf.getChannelData(c);
+      for (let i = 0; i < len; i++) ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.1);
+    }
+    reverbNode = audioCtx.createConvolver();
+    reverbNode.buffer = buf;
+    const wet = audioCtx.createGain(); wet.gain.value = 0.55;
+    reverbNode.connect(wet); wet.connect(masterGain);
+  }
+
+  function playNote(midi, vol = 0.14, dur = 1.35) {
+    if (!audioCtx || voices >= 10) return;
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const freq = 440 * Math.pow(2, (midi - 69) / 12);
+    const now = audioCtx.currentTime;
+    voices++; setTimeout(() => voices--, (dur + 0.2) * 1000);
+    const osc = audioCtx.createOscillator();
+    const fifth = audioCtx.createOscillator();
+    const g5 = audioCtx.createGain(); g5.gain.value = 0.12;
+    const env = audioCtx.createGain();
+    osc.type = 'sine'; osc.frequency.value = freq;
+    fifth.type = 'triangle'; fifth.frequency.value = freq * 2;
+    fifth.connect(g5); g5.connect(env);
+    env.gain.setValueAtTime(0.0001, now);
+    env.gain.linearRampToValueAtTime(vol, now + 0.04);
+    env.gain.exponentialRampToValueAtTime(vol * 0.38, now + 0.28);
+    env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    osc.connect(env); env.connect(masterGain); env.connect(reverbNode);
+    osc.start(now); fifth.start(now);
+    osc.stop(now + dur + 0.05); fifth.stop(now + dur + 0.05);
+  }
+
+  const SCALE = [60, 64, 67, 72];
+  const HUES  = [198, 168, 42, 268];
+  let lanterns = [];
+  let flashes = [];
+  let chords = [];
+  let lastFires = [];
+
+  function layout() {
+    const cx = W * 0.5, cy = H * 0.5;
+    const spread = Math.min(W, H) * 0.22;
+    const r = Math.min(W, H) * 0.09;
+    const spots = [
+      { x: cx,            y: cy - spread * 1.05 },
+      { x: cx - spread,   y: cy + spread * 0.15 },
+      { x: cx + spread,   y: cy + spread * 0.15 },
+      { x: cx,            y: cy + spread * 1.12 },
+    ];
+    const periods = [1.72, 2.18, 2.64, 1.96];
+    lanterns = spots.map((s, i) => ({
+      x: s.x, y: s.y, r,
+      period: periods[i],
+      phase: i * 0.23,
+      midi: SCALE[i],
+      hue: HUES[i],
+      bloom: 0,
+      slip: 0,
+    }));
+  }
+
+  function bloomOf(phase) {
+    const p = ((phase % 1) + 1) % 1;
+    const dist = Math.min(p, 1 - p);
+    const near = Math.max(0, 1 - dist / 0.14);
+    return near * near;
+  }
+
+  function fireLantern(L, now, slipped) {
+    L.bloom = 1;
+    playNote(L.midi, slipped ? 0.18 : 0.11, slipped ? 1.5 : 1.2);
+    lastFires.push({ t: now, midi: L.midi, x: L.x, y: L.y, hue: L.hue });
+    lastFires = lastFires.filter(f => now - f.t < 220);
+    const others = lastFires.filter(f => f !== lastFires.at(-1));
+    if (others.length) {
+      playNote(L.midi + 7, 0.16, 1.8);
+      playNote(others[0].midi, 0.10, 1.6);
+      chords.push({
+        ax: others[0].x, ay: others[0].y,
+        bx: L.x, by: L.y,
+        hue: (others[0].hue + L.hue) * 0.5,
+        life: 1,
+      });
+    }
+    flashes.push({ x: L.x, y: L.y, r: L.r, hue: L.hue, life: 1 });
+  }
+
+  function update(dt, now) {
+    for (const L of lanterns) {
+      const prev = L.phase;
+      L.phase += dt / L.period;
+      L.bloom *= Math.pow(0.12, dt);
+      L.slip *= Math.pow(0.08, dt);
+      if (prev < 1 && L.phase >= 1) {
+        L.phase -= 1;
+        fireLantern(L, now, false);
+      }
+    }
+    for (let i = flashes.length; i--;) {
+      flashes[i].life -= dt * 1.35;
+      if (flashes[i].life <= 0) flashes.splice(i, 1);
+    }
+    for (let i = chords.length; i--;) {
+      chords[i].life -= dt * 0.85;
+      if (chords[i].life <= 0) chords.splice(i, 1);
+    }
+  }
+
+  function drawBell(L, open) {
+    const w = L.r * (0.92 + open * 0.38);
+    const h = L.r * (0.62 - open * 0.08);
+    ctx.beginPath();
+    ctx.moveTo(-w, 8);
+    ctx.quadraticCurveTo(-w * 0.95, -h, 0, -h * 1.05);
+    ctx.quadraticCurveTo(w * 0.95, -h, w, 8);
+    ctx.quadraticCurveTo(0, 18 + open * 10, -w, 8);
+    ctx.closePath();
+  }
+
+  function draw() {
+    ctx.fillStyle = 'rgba(8,12,20,0.22)';
+    ctx.fillRect(0, 0, W, H);
+    const now = performance.now();
+
+    for (const c of chords) {
+      const a = c.life * 0.45;
+      ctx.save();
+      ctx.strokeStyle = `hsla(${c.hue},80%,72%,${a})`;
+      ctx.lineWidth = 1.2;
+      ctx.shadowBlur = 18; ctx.shadowColor = `hsla(${c.hue},80%,70%,${a})`;
+      ctx.beginPath();
+      ctx.moveTo(c.ax, c.ay); ctx.lineTo(c.bx, c.by);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    for (const L of lanterns) {
+      const open = Math.max(bloomOf(L.phase), L.bloom, L.slip);
+      const orbit = L.r * 1.85;
+      ctx.beginPath();
+      ctx.arc(L.x, L.y, orbit, 0, Math.PI * 2);
+      ctx.strokeStyle = `hsla(${L.hue},50%,70%,0.10)`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      const ang = L.phase * Math.PI * 2 - Math.PI / 2;
+      ctx.beginPath();
+      ctx.arc(L.x + Math.cos(ang) * orbit, L.y + Math.sin(ang) * orbit, 2.2 + open * 2, 0, Math.PI * 2);
+      ctx.fillStyle = `hsla(${L.hue},80%,78%,${0.35 + open * 0.55})`;
+      ctx.fill();
+
+      ctx.save();
+      ctx.translate(L.x, L.y);
+      const tentN = 5;
+      for (let k = 0; k < tentN; k++) {
+        const u = (k / (tentN - 1) - 0.5);
+        const baseX = u * L.r * 0.7;
+        const sway = Math.sin(now * 0.0018 + k * 1.3 + L.phase * 4) * (6 + open * 8);
+        ctx.beginPath();
+        ctx.moveTo(baseX, 10);
+        ctx.quadraticCurveTo(baseX + sway * 0.4, L.r * 0.9, baseX + sway, L.r * (1.55 + open * 0.35));
+        ctx.strokeStyle = `hsla(${L.hue},70%,70%,${0.18 + open * 0.28})`;
+        ctx.lineWidth = 1.1;
+        ctx.stroke();
+      }
+
+      ctx.save();
+      ctx.shadowBlur = 16 + open * 22;
+      ctx.shadowColor = `hsla(${L.hue},85%,68%,${0.35 + open * 0.5})`;
+      drawBell(L, open);
+      ctx.fillStyle = `hsla(${L.hue},70%,${62 + open * 16}%,${0.22 + open * 0.45})`;
+      ctx.fill();
+      ctx.restore();
+
+      drawBell(L, open);
+      ctx.strokeStyle = `hsla(${L.hue},60%,80%,${0.35 + open * 0.5})`;
+      ctx.lineWidth = 1.15;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    for (const f of flashes) {
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, f.r * (1.4 + (1 - f.life) * 1.8), 0, Math.PI * 2);
+      ctx.strokeStyle = `hsla(${f.hue},80%,78%,${0.35 * f.life})`;
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+    }
+  }
+
+  function nearest(x, y) {
+    let best = null, bestD = 1e9;
+    for (const L of lanterns) {
+      const d = Math.hypot(x - L.x, y - L.y);
+      if (d < bestD) { bestD = d; best = L; }
+    }
+    return bestD < Math.min(W, H) * 0.22 ? best : null;
+  }
+
+  function onTap(x, y) {
+    const L = nearest(x, y);
+    if (!L) return;
+    L.phase = 0;
+    L.slip = 1;
+    fireLantern(L, performance.now(), true);
+  }
+
+  function loop(ts) {
+    if (!t0) t0 = ts;
+    const dt = Math.min((ts - t0) / 1000, 0.05);
+    t0 = ts;
+    update(dt, ts);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  function begin(e) {
+    initAudio();
+    setupCanvas();
+    layout();
+    window.addEventListener('resize', () => { setupCanvas(); layout(); });
+    canvas.addEventListener('pointerdown', ev => {
+      const r = canvas.getBoundingClientRect();
+      onTap(ev.clientX - r.left, ev.clientY - r.top);
+    });
+    const r = canvas.getBoundingClientRect();
+    onTap(e.clientX - r.left, e.clientY - r.top);
+    const beginEl = document.getElementById('begin');
+    beginEl.style.opacity = '0';
+    setTimeout(() => beginEl.remove(), 700);
+    requestAnimationFrame(loop);
+  }
+
+  canvas.addEventListener('pointerdown', begin, { once: true });
+  </script>
+</body>
+</html>

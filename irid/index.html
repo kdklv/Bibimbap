@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>irid</title>
+  <link rel="stylesheet" href="../shared/theme.css">
+  <style>
+    .begin-screen { flex-direction: column; gap: 10px; }
+    .begin-screen .name { font-size: 30px; letter-spacing: 0.22em; color: rgba(232,234,240,0.88); }
+    .back {
+      position: fixed; top: 16px; left: 18px; z-index: 2;
+      font: 400 10px/1 system-ui; letter-spacing: 0.2em; text-transform: lowercase;
+      color: rgba(232,234,240,0.18); text-decoration: none;
+    }
+    .back:hover, .back:focus-visible { color: rgba(200,170,255,0.55); }
+  </style>
+</head>
+<body>
+  <a class="back" href="../">plankton</a>
+  <canvas id="canvas"></canvas>
+  <div class="begin-screen" id="begin">
+    <div class="name">irid</div>
+    <div>touch to begin</div>
+  </div>
+  <script src="../shared/audio.js"></script>
+  <script>
+  'use strict';
+
+  const canvas = document.getElementById('canvas');
+  let ctx, W, H, t0 = 0, clock = 0;
+
+  function setupCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    W = rect.width; H = rect.height;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+  }
+
+  let audioCtx, masterGain, reverbNode, voice = null;
+  let currentScale = 'wholeTone';
+
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    audioCtx.resume();
+    const warmth = audioCtx.createBiquadFilter();
+    warmth.type = 'lowpass'; warmth.frequency.value = 3400; warmth.Q.value = 0.55;
+    warmth.connect(audioCtx.destination);
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.28;
+    masterGain.connect(warmth);
+
+    const sr = audioCtx.sampleRate, len = Math.floor(sr * 3.1);
+    const buf = audioCtx.createBuffer(2, len, sr);
+    for (let c = 0; c < 2; c++) {
+      const ch = buf.getChannelData(c);
+      for (let i = 0; i < len; i++) ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.45);
+    }
+    reverbNode = audioCtx.createConvolver();
+    reverbNode.buffer = buf;
+    const wet = audioCtx.createGain(); wet.gain.value = 0.72;
+    reverbNode.connect(wet); wet.connect(masterGain);
+
+    const osc = audioCtx.createOscillator();
+    const harm = audioCtx.createOscillator();
+    const hg = audioCtx.createGain();
+    const filt = audioCtx.createBiquadFilter();
+    const g = audioCtx.createGain();
+    osc.type = 'sine'; osc.frequency.value = 196;
+    harm.type = 'sine'; harm.frequency.value = 392;
+    hg.gain.value = 0.05;
+    filt.type = 'lowpass'; filt.frequency.value = 880; filt.Q.value = 1.4;
+    g.gain.value = 0.0001;
+    osc.connect(filt); harm.connect(hg); hg.connect(filt);
+    filt.connect(g); g.connect(masterGain); g.connect(reverbNode);
+    osc.start(); harm.start();
+    voice = { osc, harm, hg, filt, g };
+
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && audioCtx.state === 'suspended') audioCtx.resume();
+    });
+    window.addEventListener('pageshow', () => {
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    });
+  }
+
+  const N = 44;
+  const RIM_N = 96;
+  let h, v, mask;
+  let cx, cy, rx, ry, R, cell;
+  let ph = [0.4, 1.6, 2.9];
+  let rim, rimNext;
+  let pointers = new Map();
+  let depthSmoothed = 0, roughSmoothed = 0;
+
+  function idx(i, j) { return j * N + i; }
+
+  function ellipseR(a) {
+    const rot = 0.22;
+    const c = Math.cos(a - rot), s = Math.sin(a - rot);
+    return (rx * ry) / Math.hypot(ry * c, rx * s);
+  }
+
+  function blobWarp(a) {
+    const t = clock;
+    return 1
+      + 0.075 * Math.sin(a     + ph[0] + 0.22 * Math.sin(t * 0.28))
+      + 0.048 * Math.sin(a * 2 + ph[1] + 0.18 * Math.sin(t * 0.19))
+      + 0.028 * Math.sin(a * 3 + ph[2] + 0.14 * Math.sin(t * 0.23));
+  }
+
+  function rimSample(a) {
+    let u = a / (Math.PI * 2);
+    if (u < 0) u += 1;
+    const t = u * RIM_N;
+    const i = Math.floor(t) % RIM_N;
+    const n = (i + 1) % RIM_N;
+    let f = t - Math.floor(t);
+    f = (1 - Math.cos(f * Math.PI)) * 0.5;
+    return rim[i] * (1 - f) + rim[n] * f;
+  }
+
+  function restRadius(a) { return ellipseR(a) * blobWarp(a); }
+  function pondRadius(a) { return restRadius(a) + rimSample(a); }
+
+  function inBlob(x, y, pad = 0) {
+    const dx = x - cx, dy = y - cy;
+    return Math.hypot(dx, dy) < pondRadius(Math.atan2(dy, dx)) + pad;
+  }
+
+  function initField() {
+    cx = W * 0.5; cy = H * 0.52;
+    const pad = Math.min(W, H) * 0.08;
+    rx = Math.max(70, W * 0.5 - pad) * 0.72;
+    ry = Math.max(70, H * 0.5 - pad) * 0.68;
+    R  = Math.sqrt(rx * ry);
+    cell = (Math.max(rx, ry) * 2.35) / N;
+    h = new Float32Array(N * N);
+    v = new Float32Array(N * N);
+    mask = new Uint8Array(N * N);
+    rim = new Float32Array(RIM_N);
+    rimNext = new Float32Array(RIM_N);
+    rebuildMask();
+  }
+
+  function origin() {
+    return { x: cx - (N * cell) * 0.5, y: cy - (N * cell) * 0.5 };
+  }
+
+  function cellXY(i, j) {
+    const o = origin();
+    return { x: o.x + (i + 0.5) * cell, y: o.y + (j + 0.5) * cell };
+  }
+
+  function rebuildMask() {
+    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+      const p = cellXY(i, j);
+      mask[idx(i, j)] = Math.hypot(p.x - cx, p.y - cy) < R * 1.28 ? 1 : 0;
+    }
+  }
+
+  function addWash(s, amp) {
+    const i = ((Math.round(s) % RIM_N) + RIM_N) % RIM_N;
+    rim[i] += amp;
+  }
+
+  function splashShore(a, amp) {
+    let u = a / (Math.PI * 2);
+    if (u < 0) u += 1;
+    const k = u * RIM_N;
+    const spread = 7;
+    for (let d = -spread; d <= spread; d++) {
+      const w = Math.exp(-(d * d) / (2 * (spread / 2.4) * (spread / 2.4)));
+      addWash(k + d, amp * w);
+    }
+  }
+
+  function updateRim() {
+    const max = Math.min(16, R * 0.045);
+    for (let i = 0; i < RIM_N; i++) {
+      const L = rim[(i + RIM_N - 1) % RIM_N];
+      const Rgt = rim[(i + 1) % RIM_N];
+      let x = rim[i] + (L + Rgt - 2 * rim[i]) * 0.10;
+      x *= 0.972;
+      if (x >  max) x =  max;
+      if (x < -max) x = -max;
+      rimNext[i] = x;
+    }
+    const tmp = rim; rim = rimNext; rimNext = tmp;
+  }
+
+  function lap(i, j) {
+    const c = h[idx(i, j)];
+    let s = 0, n = 0;
+    if (i > 0 && mask[idx(i - 1, j)]) { s += h[idx(i - 1, j)]; n++; }
+    if (i < N - 1 && mask[idx(i + 1, j)]) { s += h[idx(i + 1, j)]; n++; }
+    if (j > 0 && mask[idx(i, j - 1)]) { s += h[idx(i, j - 1)]; n++; }
+    if (j < N - 1 && mask[idx(i, j + 1)]) { s += h[idx(i, j + 1)]; n++; }
+    return n ? s / n - c : 0;
+  }
+
+  function poke(px, py, depth, sigma, dt) {
+    const s2 = 2 * sigma * sigma;
+    const maxD = 1.45;
+    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+      if (!mask[idx(i, j)]) continue;
+      const p = cellXY(i, j);
+      const d2 = (p.x - px) * (p.x - px) + (p.y - py) * (p.y - py);
+      const g = Math.exp(-d2 / s2);
+      if (g < 0.02) continue;
+      const k = idx(i, j);
+      const room = Math.max(0, 1 + h[k] / maxD);
+      v[k] += -depth * g * room * dt * 38;
+    }
+  }
+
+  function yieldRim(px, py, depth, dt) {
+    const dx = px - cx, dy = py - cy;
+    const a = Math.atan2(dy, dx);
+    const dist = Math.hypot(dx, dy);
+    const edge = pondRadius(a);
+    const shallow = 1 - Math.min(1, Math.abs(edge - dist) / (edge * 0.45));
+    if (shallow < 0.12) return;
+    // local give — outward tongue, viscous, not a spring
+    splashShore(a, depth * shallow * shallow * dt * 9.5);
+  }
+
+  function traceBlob() {
+    ctx.beginPath();
+    const steps = 80;
+    for (let i = 0; i <= steps; i++) {
+      const a = (i / steps) * Math.PI * 2;
+      const r = pondRadius(a);
+      const x = cx + Math.cos(a) * r;
+      const y = cy + Math.sin(a) * r;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  }
+
+  function update(dt) {
+    clock += dt;
+    updateRim();
+
+    for (const p of pointers.values()) {
+      p.depth += (1.15 - p.depth) * (1 - Math.exp(-dt / 0.32));
+      poke(p.x, p.y, p.depth, 46 + p.depth * 12, dt);
+      yieldRim(p.x, p.y, p.depth, dt);
+    }
+
+    // idle breath in the skin — very small, so rest is alive
+    for (let j = 1; j < N - 1; j++) for (let i = 1; i < N - 1; i++) {
+      const k = idx(i, j);
+      if (!mask[k]) continue;
+      const p = cellXY(i, j);
+      const d = Math.hypot(p.x - cx, p.y - cy);
+      v[k] += Math.sin(clock * 0.55 + d * 0.028) * 0.012 * dt;
+      v[k] += lap(i, j) * 72 * dt;
+      v[k] += -h[k] * 2.4 * dt;
+      v[k] *= Math.pow(0.955, dt * 60);
+    }
+
+    let minH = 0, sum = 0, sum2 = 0, n = 0;
+    for (let k = 0; k < h.length; k++) {
+      if (!mask[k]) continue;
+      h[k] += v[k] * dt;
+      if (h[k] < -1.55) { h[k] = -1.55; v[k] *= 0.25; }
+      if (h[k] >  0.95) { h[k] =  0.95; v[k] *= 0.25; }
+      if (h[k] < minH) minH = h[k];
+      sum += h[k]; sum2 += h[k] * h[k]; n++;
+    }
+
+    const mean = n ? sum / n : 0;
+    const variance = n ? Math.max(0, sum2 / n - mean * mean) : 0;
+    depthSmoothed += (-minH - depthSmoothed) * (1 - Math.exp(-dt / 0.09));
+    roughSmoothed += (Math.sqrt(variance) - roughSmoothed) * (1 - Math.exp(-dt / 0.12));
+
+    if (voice && audioCtx) {
+      const now = audioCtx.currentTime;
+      const held = pointers.size > 0;
+      const midi = Audio.noteFromY(
+        cy + (0.5 - depthSmoothed * 0.35) * H * 0.4,
+        H, currentScale, 2, 64
+      );
+      const freq = 440 * Math.pow(2, (midi - 69) / 12);
+      voice.osc.frequency.setTargetAtTime(freq, now, 0.07);
+      voice.harm.frequency.setTargetAtTime(freq * (2.02 + roughSmoothed * 1.2), now, 0.09);
+      voice.hg.gain.setTargetAtTime(0.04 + roughSmoothed * 0.5, now, 0.1);
+      voice.filt.frequency.setTargetAtTime(480 + roughSmoothed * 2200 + depthSmoothed * 360, now, 0.12);
+      voice.filt.Q.setTargetAtTime(0.9 + roughSmoothed * 3.4, now, 0.12);
+      const amp = held ? 0.035 + depthSmoothed * 0.08 : 0.007 + roughSmoothed * 0.045;
+      voice.g.gain.setTargetAtTime(amp, now, held ? 0.06 : 0.28);
+    }
+  }
+
+  function draw() {
+    ctx.fillStyle = 'rgba(8,12,20,0.30)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    traceBlob();
+    ctx.clip();
+
+    traceBlob();
+    ctx.fillStyle = 'rgba(16, 32, 48, 0.55)';
+    ctx.fill();
+
+    const o = origin();
+    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+      const k = idx(i, j);
+      if (!mask[k]) continue;
+      const L = (i > 0) ? h[idx(i - 1, j)] : h[k];
+      const Rt = (i < N - 1) ? h[idx(i + 1, j)] : h[k];
+      const U = (j > 0) ? h[idx(i, j - 1)] : h[k];
+      const D = (j < N - 1) ? h[idx(i, j + 1)] : h[k];
+      const nx = (L - Rt) * 7;
+      const ny = (U - D) * 7;
+      const lit = nx * 0.42 + ny * 0.62;
+      const z = h[k];
+      const light = 0.40 + lit * 0.52 - z * 0.30;
+      const alpha = 0.18 + Math.abs(z) * 0.42;
+      const hue = 186 + z * -48 + roughSmoothed * 36 + lit * 18;
+      ctx.fillStyle = `hsla(${hue},68%,${Math.max(18, Math.min(84, light * 72))}%,${alpha})`;
+      ctx.fillRect(o.x + i * cell, o.y + j * cell, cell + 0.5, cell + 0.5);
+    }
+
+    function crossing(i0, j0, i1, j1, lv) {
+      if (!mask[idx(i0, j0)] || !mask[idx(i1, j1)]) return null;
+      const a = h[idx(i0, j0)] - lv, b = h[idx(i1, j1)] - lv;
+      if (a * b > 0) return null;
+      const t = a / (a - b || 1e-6);
+      const p0 = cellXY(i0, j0), p1 = cellXY(i1, j1);
+      return { x: p0.x + (p1.x - p0.x) * t, y: p0.y + (p1.y - p0.y) * t };
+    }
+    ctx.lineWidth = 1;
+    const levels = [-0.85, -0.5, -0.22, 0.18, 0.4];
+    for (let li = 0; li < levels.length; li++) {
+      const lv = levels[li];
+      ctx.strokeStyle = `hsla(${200 - li * 12},70%,78%,0.20)`;
+      ctx.beginPath();
+      for (let j = 1; j < N; j++) for (let i = 1; i < N; i++) {
+        const pts = [
+          crossing(i - 1, j - 1, i, j - 1, lv),
+          crossing(i, j - 1, i, j, lv),
+          crossing(i - 1, j, i, j, lv),
+          crossing(i - 1, j - 1, i - 1, j, lv),
+        ].filter(Boolean);
+        if (pts.length >= 2) {
+          ctx.moveTo(pts[0].x, pts[0].y);
+          ctx.lineTo(pts[1].x, pts[1].y);
+        }
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    traceBlob();
+    ctx.strokeStyle = 'rgba(220, 210, 255, 0.42)';
+    ctx.lineWidth = 1.35;
+    ctx.stroke();
+
+    ctx.save();
+    ctx.globalAlpha = 0.12;
+    ctx.strokeStyle = 'rgba(160,196,255,1)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    const steps = 80;
+    for (let i = 0; i <= steps; i++) {
+      const a = (i / steps) * Math.PI * 2;
+      const r = restRadius(a) + 6;
+      const x = cx + Math.cos(a) * r;
+      const y = cy + Math.sin(a) * r;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+
+    for (const p of pointers.values()) {
+      const u = p.depth / 1.15;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 9 + u * 16, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(232,234,240,${0.10 + u * 0.18})`;
+      ctx.lineWidth = 1.05;
+      ctx.stroke();
+    }
+  }
+
+  function setupInput() {
+    canvas.addEventListener('pointerdown', e => {
+      const r = canvas.getBoundingClientRect();
+      const x = e.clientX - r.left, y = e.clientY - r.top;
+      if (!inBlob(x, y, 10)) return;
+      canvas.setPointerCapture(e.pointerId);
+      pointers.set(e.pointerId, { x, y, depth: 0.12 });
+    });
+    canvas.addEventListener('pointermove', e => {
+      const p = pointers.get(e.pointerId);
+      if (!p) return;
+      const r = canvas.getBoundingClientRect();
+      p.x = e.clientX - r.left;
+      p.y = e.clientY - r.top;
+    });
+    const up = e => pointers.delete(e.pointerId);
+    canvas.addEventListener('pointerup', up);
+    canvas.addEventListener('pointercancel', up);
+
+    window.addEventListener('keydown', e => {
+      if (e.key >= '1' && e.key <= '5') {
+        currentScale = ['gamelan', 'pentatonic', 'wholeTone', 'major', 'minor'][+e.key - 1];
+      }
+    });
+  }
+
+  function loop(ts) {
+    if (!t0) t0 = ts;
+    const dt = Math.min((ts - t0) / 1000, 0.05);
+    t0 = ts;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  function begin(e) {
+    initAudio();
+    setupCanvas();
+    initField();
+    setupInput();
+    window.addEventListener('resize', () => { setupCanvas(); initField(); });
+    const r = canvas.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    if (inBlob(x, y, 10)) {
+      canvas.setPointerCapture(e.pointerId);
+      pointers.set(e.pointerId, { x, y, depth: 0.12 });
+    }
+    const beginEl = document.getElementById('begin');
+    beginEl.style.opacity = '0';
+    setTimeout(() => beginEl.remove(), 700);
+    requestAnimationFrame(loop);
+  }
+
+  canvas.addEventListener('pointerdown', begin, { once: true });
+  </script>
+</body>
+</html>

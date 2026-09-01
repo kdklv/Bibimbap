@@ -2,19 +2,65 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>slosh</title>
   <link rel="stylesheet" href="../shared/theme.css">
   <style>
     .begin-screen { flex-direction: column; gap: 10px; }
     .begin-screen .name { font-size: 30px; letter-spacing: 0.22em; color: rgba(232,234,240,0.88); }
+    .modes {
+      position: fixed;
+      bottom: max(16px, env(safe-area-inset-bottom));
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 2;
+      display: none;
+      gap: 2px;
+      padding: 3px;
+      background: rgba(8, 12, 20, 0.78);
+      border: 1px solid rgba(160, 196, 255, 0.12);
+      font: 400 10px/1 system-ui;
+      letter-spacing: 0.16em;
+      text-transform: lowercase;
+      user-select: none;
+      pointer-events: auto;
+      touch-action: manipulation;
+    }
+    .modes[data-on="1"] { display: flex; }
+    .modes button {
+      appearance: none;
+      min-width: 72px;
+      min-height: 44px;
+      padding: 0 14px;
+      border: 0;
+      background: transparent;
+      color: rgba(232, 234, 240, 0.38);
+      letter-spacing: 0.16em;
+      text-transform: lowercase;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+    }
+    .modes button[aria-checked="true"] {
+      background: rgba(160, 196, 255, 0.12);
+      color: rgba(232, 234, 240, 0.88);
+    }
+    .modes button:focus-visible {
+      outline: 1px solid rgba(160, 196, 255, 0.55);
+      outline-offset: 2px;
+    }
   </style>
 </head>
 <body>
-  <canvas id="canvas"></canvas>
+  <canvas id="canvas" aria-label="slosh. heavy drops in a gel cell. pull a drop to sling it; they dent the skin and stain the film."></canvas>
   <div class="begin-screen" id="begin">
     <div class="name">slosh</div>
     <div>touch to begin</div>
+  </div>
+  <div class="modes" id="modes" role="radiogroup" aria-label="feel" data-on="0">
+    <button type="button" role="radio" aria-checked="true" data-mode="tow" title="taut pocket sling. Z">tow</button>
+    <button type="button" role="radio" aria-checked="false" data-mode="lead" title="heavy punches. X">lead</button>
+    <button type="button" role="radio" aria-checked="false" data-mode="soak" title="deep well, stained film. C">soak</button>
   </div>
   <script src="../shared/audio.js"></script>
   <script>
@@ -22,6 +68,54 @@
 
   const canvas = document.getElementById('canvas');
   let ctx, W, H;
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // Three heavies, all with swell's finger well. Balls are massive: they
+  // deform the rim on impact and stamp the film differently from a touch
+  // (touch sinks a cool well; balls raise hills, leave a wake, or stain).
+  //   mass       scales collisions and wall punches
+  //   ballSkin   + hills / wake, − colored dimples
+  //   slingK     snap toward the grab-anchor on release
+  const MODES = {
+    tow: {
+      grab: 'orb', grabPad: 40, follow: 0.14, slingK: 0.24, flick: 0.58,
+      maxStretch: 0.38, cap: 9.5, bounce: 0.84, damp: 0.993, pullOut: 70,
+      wallPush: 13, ballBounce: 0.86, tetherPull: 1.12, dentPress: 7,
+      well: 1.12, gather: 0.72, filament: 1, mass: 1.35, ballSkin: 0.62,
+    },
+    lead: {
+      grab: 'orb', grabPad: 42, follow: 0.10, slingK: 0.20, flick: 0.38,
+      maxStretch: 0.40, cap: 8.2, bounce: 0.72, damp: 0.994, pullOut: 64,
+      wallPush: 20, ballBounce: 0.78, tetherPull: 0.92, dentPress: 8,
+      well: 1.08, gather: 0.50, filament: 1, mass: 1.85, ballSkin: 0.95,
+    },
+    soak: {
+      grab: 'orb', grabPad: 38, follow: 0.13, slingK: 0.18, flick: 0.45,
+      maxStretch: 0.34, cap: 7.6, bounce: 0.80, damp: 0.992, pullOut: 68,
+      wallPush: 11, ballBounce: 0.84, tetherPull: 0.80, dentPress: 11,
+      well: 1.28, gather: 1.05, filament: 1, mass: 1.28, ballSkin: -0.72,
+    },
+  };
+  let modeId = 'tow';
+  let mode = MODES.tow;
+
+  function setMode(id) {
+    if (!MODES[id]) return;
+    if (grabbing) {
+      grabbing.held = false;
+      grabbing = null;
+    }
+    grabAnchor = null;
+    pointerDown = false;
+    modeId = id;
+    mode = MODES[id];
+    try { sessionStorage.setItem('slosh-mode', id); } catch (_) {}
+    const group = document.getElementById('modes');
+    if (!group) return;
+    group.querySelectorAll('[role="radio"]').forEach(btn => {
+      btn.setAttribute('aria-checked', btn.dataset.mode === id ? 'true' : 'false');
+    });
+  }
 
   function setupCanvas() {
     const dpr = window.devicePixelRatio || 1;
@@ -34,8 +128,9 @@
   }
 
   // ─── Audio ────────────────────────────────────────────────────────────────
-  let audioCtx, masterGain, reverbNode;
+  let audioCtx, masterGain, reverbNode, voice = null;
   let activeVoices = 0;
+  let depthSmoothed = 0, roughSmoothed = 0;
 
   function initAudio() {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -62,6 +157,21 @@
     const wet = audioCtx.createGain(); wet.gain.value = 0.42;
     reverbNode.connect(wet); wet.connect(masterGain);
 
+    const osc = audioCtx.createOscillator();
+    const harm = audioCtx.createOscillator();
+    const hg = audioCtx.createGain();
+    const filt = audioCtx.createBiquadFilter();
+    const g = audioCtx.createGain();
+    osc.type = 'sine'; osc.frequency.value = 196;
+    harm.type = 'sine'; harm.frequency.value = 392;
+    hg.gain.value = 0.05;
+    filt.type = 'lowpass'; filt.frequency.value = 720; filt.Q.value = 1.1;
+    g.gain.value = 0.0001;
+    osc.connect(filt); harm.connect(hg); hg.connect(filt);
+    filt.connect(g); g.connect(masterGain); g.connect(reverbNode);
+    osc.start(); harm.start();
+    voice = { osc, harm, hg, filt, g };
+
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden && audioCtx.state === 'suspended') audioCtx.resume();
     });
@@ -79,7 +189,7 @@
     setTimeout(() => activeVoices--, (dur + 0.2) * 1000);
 
     const osc   = audioCtx.createOscillator();
-    const third = audioCtx.createOscillator(); // 3rd harmonic — warmth
+    const third = audioCtx.createOscillator();
     const thirdG = audioCtx.createGain();
     const env   = audioCtx.createGain();
 
@@ -146,7 +256,6 @@
     move(dx,dy){this.x+=dx;this.y+=dy;}
     addF(fx,fy){this.vx+=fx;this.vy+=fy;}
     testCol(ox,oy,or){const dx=ox-this.x,dy=oy-this.y,d=dx*dx+dy*dy,cr=or+this.r;if(d<cr*cr){const fm=Math.sqrt(d)-cr,im=1/d;return{x:dx*im*fm,y:dy*im*fm};}return null;}
-    col(ox,oy,or){const dx=ox-this.x,dy=oy-this.y,d=dx*dx+dy*dy,cr=or+this.r;if(d<cr*cr){const fm=Math.sqrt(d)-cr,im=1/d;this.move(dx*im*fm,dy*im*fm);this.px+=(this.x-this.px)*this.friction;this.py+=(this.y-this.py)*this.friction;return{x:dx*im*fm,y:dy*im*fm};}return null;}
     con(l,t,r,b){let c=false;if(this.x>r-2){this.x=r-2;c=true;}else if(this.x<l+2){this.x=l+2;c=true;}if(this.y>b-2){this.y=b-2;c=true;}else if(this.y<t+2){this.y=t+2;c=true;}if(c){this.px+=(this.x-this.px)*this.friction;this.py+=(this.y-this.py)*this.friction;}}
     upd(dt=1){this.px=this.x;this.py=this.y;this.x+=this.vx*dt;this.y+=this.vy*dt;}
     end(dt=1){const m=this.damping/dt;this.vx=(this.x-this.px)*m;this.vy=(this.y-this.py)*m;}
@@ -167,19 +276,165 @@
     });
     verts.forEach((v,i) => { v.setP(verts[(i+n-1)%n]); v.setN(verts[(i+1)%n]); if(i===0) v.setR(true); });
     const js = verts.flatMap(v => [new DJ(v,v.n,evDist,0.75*TENS), new DJ(v,v.n.n,evDist*2,0.25*TENS)]);
-    const ar = geo.polyArea(verts) * (0.6 + Math.random()*0.3);
-    const blob = {ar, ca:ar, ad:0, rp:verts[0], ps:verts, js, r};
+    const ar = geo.polyArea(verts) * 0.82;
+    const blob = {ar, baseAr: ar, ca:ar, ad:0, rp:verts[0], ps:verts, js, r};
     blob.ps.forEach(p => { p.parent=blob; });
     return blob;
   }
 
+  // ─── Skin — irid's gel film, clipped to the Verlet cell ────────────────────
+  const SKIN_N = 52;
+  let skinH, skinV, skinMask, skinCell, skinCx, skinCy, skinR;
+
+  function sidx(i, j) { return j * SKIN_N + i; }
+
+  function skinOrigin() {
+    return { x: skinCx - SKIN_N * skinCell * 0.5, y: skinCy - SKIN_N * skinCell * 0.5 };
+  }
+
+  function skinXY(i, j) {
+    const o = skinOrigin();
+    return { x: o.x + (i + 0.5) * skinCell, y: o.y + (j + 0.5) * skinCell };
+  }
+
+  function initSkin() {
+    skinH = new Float32Array(SKIN_N * SKIN_N);
+    skinV = new Float32Array(SKIN_N * SKIN_N);
+    skinMask = new Uint8Array(SKIN_N * SKIN_N);
+    layoutSkin();
+  }
+
+  function layoutSkin() {
+    const c = blobCentroid();
+    skinCx = c.x; skinCy = c.y;
+    const rest = blbs[0] ? blbs[0].r : Math.min(W, H) * 0.3;
+    // Keep cell size stable so a sling stretch does not coarsen the film.
+    skinR = rest * 1.32;
+    skinCell = (skinR * 2) / SKIN_N;
+    for (let j = 0; j < SKIN_N; j++) for (let i = 0; i < SKIN_N; i++) {
+      const p = skinXY(i, j);
+      skinMask[sidx(i, j)] = Math.hypot(p.x - skinCx, p.y - skinCy) < skinR ? 1 : 0;
+    }
+  }
+
+  function pokeSkin(px, py, depth, sigma, dt, rate) {
+    if (!skinH) return;
+    const s2 = 2 * sigma * sigma;
+    const kRate = rate == null ? (38 + mode.well * 28) : rate;
+    for (let j = 0; j < SKIN_N; j++) for (let i = 0; i < SKIN_N; i++) {
+      const k = sidx(i, j);
+      if (!skinMask[k]) continue;
+      const p = skinXY(i, j);
+      const d2 = (p.x - px) * (p.x - px) + (p.y - py) * (p.y - py);
+      const g = Math.exp(-d2 / s2);
+      if (g < 0.02) continue;
+      const raising = depth < 0;
+      const room = raising
+        ? Math.max(0, 1 - skinH[k] / 0.75)
+        : Math.max(0, 1 + skinH[k] / 1.5);
+      skinV[k] += -depth * g * room * dt * kRate;
+    }
+  }
+
+  function skinLap(i, j) {
+    const c = skinH[sidx(i, j)];
+    let s = 0, n = 0;
+    if (i > 0 && skinMask[sidx(i - 1, j)]) { s += skinH[sidx(i - 1, j)]; n++; }
+    if (i < SKIN_N - 1 && skinMask[sidx(i + 1, j)]) { s += skinH[sidx(i + 1, j)]; n++; }
+    if (j > 0 && skinMask[sidx(i, j - 1)]) { s += skinH[sidx(i, j - 1)]; n++; }
+    if (j < SKIN_N - 1 && skinMask[sidx(i, j + 1)]) { s += skinH[sidx(i, j + 1)]; n++; }
+    return n ? s / n - c : 0;
+  }
+
+  function updateSkin(dt) {
+    if (!skinH) return 0;
+    layoutSkin();
+    const spread = 72;
+    const spring = 2.4;
+    const damp = Math.pow(0.955, dt * 60);
+    const breath = reduceMotion ? 0 : 1;
+    for (let j = 1; j < SKIN_N - 1; j++) for (let i = 1; i < SKIN_N - 1; i++) {
+      const k = sidx(i, j);
+      if (!skinMask[k]) continue;
+      const p = skinXY(i, j);
+      const d = Math.hypot(p.x - skinCx, p.y - skinCy);
+      skinV[k] += Math.sin(clock * 0.00055 + d * 0.028) * 0.012 * dt * breath;
+      skinV[k] += skinLap(i, j) * spread * dt;
+      skinV[k] += -skinH[k] * spring * dt;
+      skinV[k] *= damp;
+    }
+    let minH = 0, sum = 0, sum2 = 0, nLive = 0;
+    for (let k = 0; k < skinH.length; k++) {
+      if (!skinMask[k]) continue;
+      skinH[k] += skinV[k] * dt;
+      if (skinH[k] < -1.55) { skinH[k] = -1.55; skinV[k] *= 0.22; }
+      if (skinH[k] >  0.80) { skinH[k] =  0.80; skinV[k] *= 0.22; }
+      if (skinH[k] < minH) minH = skinH[k];
+      sum += skinH[k]; sum2 += skinH[k] * skinH[k]; nLive++;
+    }
+    if (nLive) {
+      const mean = sum / nLive;
+      const pull = mean * 0.34;
+      for (let k = 0; k < skinH.length; k++) if (skinMask[k]) skinH[k] -= pull;
+      const variance = Math.max(0, sum2 / nLive - mean * mean);
+      roughSmoothed += (Math.sqrt(variance) - roughSmoothed) * (1 - Math.exp(-dt / 0.14));
+    }
+    return -minH;
+  }
+
+  function drawSkin() {
+    if (!skinH) return;
+    const o = skinOrigin();
+    const rough = roughSmoothed;
+    const size = skinCell + 1;
+    for (let j = 0; j < SKIN_N; j++) for (let i = 0; i < SKIN_N; i++) {
+      const k = sidx(i, j);
+      if (!skinMask[k]) continue;
+      const p = skinXY(i, j);
+      const z = skinH[k];
+      const L = (i > 0) ? skinH[k - 1] : z;
+      const Rt = (i < SKIN_N - 1) ? skinH[k + 1] : z;
+      const U = (j > 0) ? skinH[k - SKIN_N] : z;
+      const D = (j < SKIN_N - 1) ? skinH[k + SKIN_N] : z;
+      const nx = (L - Rt) * 7;
+      const ny = (U - D) * 7;
+      const lit = nx * 0.42 + ny * 0.62;
+      const form = -((p.x - skinCx) / skinR) * 0.16 - ((p.y - skinCy) / skinR) * 0.26;
+      const light = 0.40 + lit * 0.52 - z * 0.30 + form;
+      const alpha = 0.22 + Math.abs(z) * 0.44;
+      let hue = 186 + z * -48 + rough * 36 + lit * 18;
+      let tint = 0, tw = 0;
+      for (const nuc of nuclei) {
+        const dd = Math.hypot(p.x - nuc.x, p.y - nuc.y);
+        const sig = nuc.r * 3.4;
+        const inf = Math.exp(-(dd * dd) / (2 * sig * sig));
+        if (inf < 0.05) continue;
+        tint += nuc.hue * inf;
+        tw += inf;
+      }
+      if (tw > 0.08) {
+        const u = Math.min(1, tw) * 0.38;
+        hue = hue * (1 - u) + (tint / tw) * u;
+      }
+      ctx.fillStyle = `hsla(${hue},68%,${Math.max(18, Math.min(84, light * 72))}%,${alpha})`;
+      ctx.fillRect(o.x + i * skinCell, o.y + j * skinCell, size, size);
+    }
+  }
+
   function initBlob() {
     const rad = Math.min(W,H) * (Math.min(W,H) < 600 ? 0.38 : 0.30);
-    evDist = 0.025 * Math.min(W, H);
+    evDist = 0.014 * Math.min(W, H);
     grid = new HG(W, H, Math.floor(evDist*2));
     parts=[]; jnts=[]; blbs=[];
-    const b = genBlob(W/2, H/2, rad);
+    const b = genBlob(W/2, H*0.52, rad);
     blbs.push(b); parts.push(...b.ps); jnts.push(...b.js);
+  }
+
+  function blobCentroid() {
+    if (!parts.length) return { x: W/2, y: H*0.52 };
+    let x=0, y=0;
+    for (const p of parts) { x+=p.x; y+=p.y; }
+    return { x: x/parts.length, y: y/parts.length };
   }
 
   function pointIn(px, py) {
@@ -195,43 +450,45 @@
   }
 
   // ─── Nuclei ───────────────────────────────────────────────────────────────
-  // 5 note palettes — press 1-5 to switch, R to scatter
   const PALETTES = [
-    [60, 64, 67, 69, 72], // C pentatonic
-    [62, 65, 69, 71, 74], // D pentatonic
-    [55, 59, 62, 64, 67], // G pentatonic (lower)
-    [57, 60, 64, 65, 69], // A pentatonic
-    [53, 57, 60, 62, 65], // F pentatonic
+    [60, 64, 67, 69, 72],
+    [62, 65, 69, 71, 74],
+    [55, 59, 62, 64, 67],
+    [57, 60, 64, 65, 69],
+    [53, 57, 60, 62, 65],
   ];
   let currentPalette = 0;
 
-  // hue, radius inversely proportional to pitch (lower = bigger)
   const NUCLEUS_DEFS = [
-    { hue: 30,  r: 13 }, // orange  — C (lowest, biggest)
-    { hue: 90,  r: 11 }, // lime    — E
-    { hue: 170, r: 10 }, // teal    — G
-    { hue: 240, r:  9 }, // blue    — A
-    { hue: 300, r:  8 }, // magenta — C5 (highest, smallest)
+    { hue: 30,  r: 19, mass: 1.55 },
+    { hue: 90,  r: 17, mass: 1.35 },
+    { hue: 170, r: 16, mass: 1.22 },
+    { hue: 240, r: 15, mass: 1.10 },
+    { hue: 300, r: 14, mass: 1.00 },
   ];
 
   let nuclei = [];
-  let wallFlashes = []; // { x, y, hue, life, maxLife }
-  let gustRipples = []; // expanding rings from a poke
-  let edgeWaves = [];   // traveling shimmer along the membrane
+  let wallFlashes = [];
+  let gustRipples = [];
+  let edgeWaves = [];
   let clock = 0;
+  let lastStrokeAt = 0;
 
   function initNuclei() {
     nuclei = NUCLEUS_DEFS.map((def, i) => ({
-      x: W/2 + (Math.random()-0.5)*60,
-      y: H/2 + (Math.random()-0.5)*60,
-      vx: (Math.random()-0.5)*1.2,
-      vy: (Math.random()-0.5)*1.2,
+      x: W/2 + (Math.random()-0.5)*50,
+      y: H*0.52 + (Math.random()-0.5)*50,
+      vx: (Math.random()-0.5)*0.45,
+      vy: (Math.random()-0.5)*0.45,
       r: def.r,
+      mass: def.mass,
       hue: def.hue,
       midi: PALETTES[currentPalette][i],
       flash: 0,
       cooldown: 0,
-      trail: [],
+      held: false,
+      hold: 0,
+      grace: 0,
       wallPt: null,
       wallDist: Infinity,
     }));
@@ -241,12 +498,12 @@
   }
 
   function scatterNuclei() {
-    for(const nuc of nuclei) {
+    for (const nuc of nuclei) {
+      if (nuc.held) continue;
       const a = Math.random()*Math.PI*2;
-      const spd = 1.4 + Math.random()*1.6;
+      const spd = 1.1 + Math.random()*1.2;
       nuc.vx = Math.cos(a)*spd;
       nuc.vy = Math.sin(a)*spd;
-      nuc.trail = [];
     }
   }
 
@@ -257,97 +514,177 @@
     return {x:ax+t*dx, y:ay+t*dy};
   }
 
-  function updateNuclei() {
-    if(!blbs.length) return;
-    const verts = blbs[0].ps;
+  function grabRadius(nuc) {
+    return Math.max(mode.grabPad, nuc.r + 12);
+  }
 
-    // Nucleus-nucleus repulsion (O(n²), n=5 → 10 pairs)
-    for(let i=0;i<nuclei.length;i++){
-      for(let j=i+1;j<nuclei.length;j++){
+  function pickGrab(px, py) {
+    if (mode.grab === 'none') return null;
+    const hit = membraneHit(px, py);
+    const onRim = hit.d < Math.max(22, evDist * 3);
+    let best = null, bestD = Infinity;
+    for (const nuc of nuclei) {
+      const d = Math.hypot(nuc.x - px, nuc.y - py);
+      if (d < bestD) { best = nuc; bestD = d; }
+    }
+    if (!best) return null;
+    const reach = onRim ? Math.max(16, best.r + 10) : grabRadius(best);
+    return bestD < reach ? best : null;
+  }
+
+  function updateNuclei(dt) {
+    if (!blbs.length) return;
+    const verts = blbs[0].ps;
+    const frames = dt * 60;
+
+    // Elastic ball-ball collisions so a flung drop breaks the pack (pool).
+    for (let i=0;i<nuclei.length;i++){
+      for (let j=i+1;j<nuclei.length;j++){
         const a=nuclei[i], b=nuclei[j];
         const dx=b.x-a.x, dy=b.y-a.y;
         const d=Math.hypot(dx,dy);
-        const REP=a.r+b.r+14;
-        if(d<REP && d>0.001){
-          const push=(REP-d)*0.18/d;
-          a.vx-=dx*push; a.vy-=dy*push;
-          b.vx+=dx*push; b.vy+=dy*push;
+        const min=a.r+b.r+4;
+        if (d>=min || d<=0.001) continue;
+        const nx=dx/d, ny=dy/d, overlap=min-d;
+        if (a.held && b.held) continue;
+        if (a.held || b.held) {
+          // Held drop acts immovable; it shoves the free one aside.
+          const free = a.held ? b : a;
+          const sgn  = a.held ? 1 : -1;
+          free.x += nx * overlap * sgn;
+          free.y += ny * overlap * sgn;
+          continue;
+        }
+        a.x -= nx*overlap*0.5; a.y -= ny*overlap*0.5;
+        b.x += nx*overlap*0.5; b.y += ny*overlap*0.5;
+        const vn = (b.vx-a.vx)*nx + (b.vy-a.vy)*ny;
+        if (vn < 0) {
+          const imA = 1 / ((a.mass || 1) * mode.mass);
+          const imB = 1 / ((b.mass || 1) * mode.mass);
+          const jimp = -(1 + mode.ballBounce) * vn / (imA + imB);
+          a.vx -= jimp*nx*imA; a.vy -= jimp*ny*imA;
+          b.vx += jimp*nx*imB; b.vy += jimp*ny*imB;
         }
       }
     }
 
-    for(let ni = 0; ni < nuclei.length; ni++) {
+    for (let ni = 0; ni < nuclei.length; ni++) {
       const nuc = nuclei[ni];
-      // Slow drift + light gravity — suspended, not jittery
-      nuc.vy += 0.016;
-      nuc.vx += Math.sin(clock * 0.00055 + nuc.hue) * 0.010;
-      nuc.vy += Math.cos(clock * 0.00042 + ni * 1.7) * 0.006;
+      nuc.hold += ((nuc.held ? 1 : 0) - nuc.hold) * (1 - Math.exp(-dt / (nuc.held ? 0.08 : 0.14)));
 
-      const spd = Math.hypot(nuc.vx, nuc.vy);
-      if(spd > 3.2) { nuc.vx *= 3.2/spd; nuc.vy *= 3.2/spd; }
+      if (nuc.held) {
+        const k = mode.follow;
+        const ox = nuc.x, oy = nuc.y;
+        nuc.x += (mx - nuc.x) * k;
+        nuc.y += (my - nuc.y) * k;
+        nuc.vx = nuc.x - ox;
+        nuc.vy = nuc.y - oy;
+      } else {
+        nuc.vy += 0.0035 * (nuc.mass || 1);
+        nuc.vx += Math.sin(clock * 0.00055 + nuc.hue) * 0.008;
+        nuc.vy += Math.cos(clock * 0.00042 + ni * 1.7) * 0.005;
 
-      nuc.x += nuc.vx;
-      nuc.y += nuc.vy;
+        // Finger on the gel (no grab): gather the drops in, or shove them off.
+        if (pointerDown && !grabbing && pointIn(mx, my) && Math.abs(mode.gather) > 0.01) {
+          const dx = mx - nuc.x, dy = my - nuc.y;
+          const d = Math.hypot(dx, dy);
+          const R = Math.min(W, H) * 0.34;
+          if (d > 1 && d < R) {
+            const w = (1 - d / R) * (1 - d / R);
+            nuc.vx += (dx / d) * mode.gather * w * contact * 0.5;
+            nuc.vy += (dy / d) * mode.gather * w * contact * 0.5;
+          }
+        }
 
-      // Comet trail
-      nuc.trail.push({x:nuc.x, y:nuc.y});
-      if(nuc.trail.length > 18) nuc.trail.shift();
+        const spd = Math.hypot(nuc.vx, nuc.vy);
+        const cap = mode.cap;
+        if (spd > cap) { nuc.vx *= cap/spd; nuc.vy *= cap/spd; }
 
-      if(nuc.flash    > 0) nuc.flash--;
-      if(nuc.cooldown > 0) nuc.cooldown--;
+        nuc.x += nuc.vx;
+        nuc.y += nuc.vy;
+        nuc.vx *= mode.damp;
+        nuc.vy *= mode.damp;
+      }
 
-      // Find closest wall segment + outward normal
-      let minDist=Infinity, bestNx=0, bestNy=1, bestCp=null;
-      for(const v of verts) {
+      if (nuc.flash    > 0) nuc.flash    -= frames;
+      if (nuc.cooldown > 0) nuc.cooldown -= frames;
+
+      let minDist=Infinity, bestNx=0, bestNy=1, bestCp=null, bestI=0;
+      for (let vi=0; vi<verts.length; vi++){
+        const v = verts[vi];
         const cp = closestPtOnSeg(nuc.x,nuc.y, v.x,v.y, v.n.x,v.n.y);
         const dx=nuc.x-cp.x, dy=nuc.y-cp.y;
         const d = Math.hypot(dx,dy);
-        if(d < minDist) {
-          minDist=d; bestCp=cp;
-          if(d>0.001){ bestNx=dx/d; bestNy=dy/d; }
+        if (d < minDist) {
+          minDist=d; bestCp=cp; bestI=vi;
+          if (d>0.001){ bestNx=dx/d; bestNy=dy/d; }
         }
       }
       nuc.wallPt   = bestCp;
       nuc.wallDist = minDist;
 
-      // Safety escape
-      if(!pointIn(nuc.x, nuc.y)) {
-        nuc.x -= bestNx*(minDist + nuc.r + 2);
-        nuc.y -= bestNy*(minDist + nuc.r + 2);
-        const dot = nuc.vx*bestNx + nuc.vy*bestNy;
-        nuc.vx -= 2*dot*bestNx;
-        nuc.vy -= 2*dot*bestNy;
+      const heft = (nuc.mass || 1) * mode.mass;
+
+      if (nuc.held) {
+        if (!pointIn(nuc.x, nuc.y) && minDist > nuc.r + mode.pullOut) {
+          nuc.x -= bestNx * (minDist - nuc.r - mode.pullOut * 0.65);
+          nuc.y -= bestNy * (minDist - nuc.r - mode.pullOut * 0.65);
+        }
         continue;
       }
 
-      // Wall collision — reflect + sound + flash
-      const HIT = nuc.r + 5;
-      if(minDist < HIT) {
+      if (nuc.grace > 0) nuc.grace -= frames;
+
+      if (!pointIn(nuc.x, nuc.y)) {
+        nuc.x -= bestNx*(minDist + nuc.r + 2);
+        nuc.y -= bestNy*(minDist + nuc.r + 2);
+        if (nuc.grace > 0) continue;
+        const dot = nuc.vx*bestNx + nuc.vy*bestNy;
+        if (dot < 0) {
+          const impact = -dot;
+          if (impact > 0.22) pushMembrane(bestI, bestNx, bestNy, impact * mode.wallPush * heft, verts.length);
+          nuc.vx -= 2*dot*bestNx * mode.bounce;
+          nuc.vy -= 2*dot*bestNy * mode.bounce;
+          if (impact > 0.35 && nuc.cooldown <= 0 && bestCp) {
+            playNote(nuc.midi, Math.min(0.12, 0.03 + impact*0.02), 0.6);
+            nuc.flash = 22; nuc.cooldown = 20;
+            wallFlashes.push({x:bestCp.x, y:bestCp.y, hue:nuc.hue, life:44, maxLife:44});
+            spawnEdgeWave(bestCp.x, bestCp.y, nuc.hue, 4 + Math.min(6, impact*1.8));
+          }
+        }
+        continue;
+      }
+
+      const HIT = nuc.r + 6;
+      if (minDist < HIT) {
         const overlap = HIT - minDist;
         nuc.x += bestNx*overlap;
         nuc.y += bestNy*overlap;
+        if (nuc.grace > 0) continue;
         const dot = nuc.vx*bestNx + nuc.vy*bestNy;
-        if(dot < 0) {
-          nuc.vx -= 2*dot*bestNx * 0.62;
-          nuc.vy -= 2*dot*bestNy * 0.62;
+        if (dot < 0) {
+          const impact = -dot;
+          if (impact > 0.22) pushMembrane(bestI, bestNx, bestNy, impact * mode.wallPush * heft, verts.length);
+          nuc.vx -= 2*dot*bestNx * mode.bounce;
+          nuc.vy -= 2*dot*bestNy * mode.bounce;
         }
-        if(nuc.cooldown <= 0) {
-          const vel = Math.abs(dot);
-          playNote(nuc.midi, Math.min(0.12, 0.045 + vel*0.014), 1.15);
-          nuc.flash    = 28;
-          nuc.cooldown = 28;
-          if(bestCp) {
-            wallFlashes.push({x:bestCp.x, y:bestCp.y, hue:nuc.hue, life:52, maxLife:52});
-            spawnEdgeWave(bestCp.x, bestCp.y, nuc.hue, 5 + Math.min(4, vel * 1.4));
+        const vel = Math.abs(dot);
+        if (vel > 0.18 && nuc.cooldown <= 0) {
+          const loud = vel > 0.9;
+          playNote(nuc.midi, loud ? Math.min(0.13, 0.055 + vel*0.03) : 0.032 + vel*0.018, loud ? 1.1 : 0.7);
+          nuc.flash    = 26;
+          nuc.cooldown = 36;
+          if (bestCp) {
+            wallFlashes.push({x:bestCp.x, y:bestCp.y, hue:nuc.hue, life:48, maxLife:48});
+            spawnEdgeWave(bestCp.x, bestCp.y, nuc.hue, 4 + Math.min(5, vel * 1.6));
           }
         }
       }
     }
 
-    // Decay wall flashes
-    for(let i=wallFlashes.length-1;i>=0;i--){
-      wallFlashes[i].life--;
-      if(wallFlashes[i].life<=0) wallFlashes.splice(i,1);
+    for (let i=wallFlashes.length-1;i>=0;i--){
+      wallFlashes[i].life -= frames;
+      if (wallFlashes[i].life<=0) wallFlashes.splice(i,1);
     }
   }
 
@@ -357,8 +694,8 @@
     gustRipples.push({
       x, y,
       r: 6,
-      maxR: Math.min(W, H) * 0.36,
-      speed: Math.min(W, H) * 0.0026,
+      maxR: Math.min(W, H) * 0.28,
+      speed: Math.min(W, H) * 0.0022,
     });
   }
 
@@ -414,12 +751,14 @@
 
   // ─── Input ────────────────────────────────────────────────────────────────
   let mx, my, mxd, myd;
-  let gusts = [];
-  const GUST_FRAMES = 32;
-  let bs, bm;
-
   let pointerDown = false;
-  let contact = 0; // 0–1, eases the hold-collider in and out
+  let pointerOver = false;
+  let contact = 0;
+  let hover = 0;
+  let stir = 0;
+  let grabbing = null;
+  let grabAnchor = null;
+  let velHist = [];
 
   function membraneHit(px, py) {
     if (!blbs.length) return { d: Infinity, nx: 0, ny: 1, i: 0 };
@@ -439,62 +778,124 @@
     return { d: bestD, nx: bestNx, ny: bestNy, i: bestI };
   }
 
-  // Soft dent: nearby verts yield along the surface normal, not radially
-  // (radial from a point on the rim shears the ring apart).
-  function pluckEdge(hit, inside, strength) {
+  // A ball impact bulges the wall outward here, then the area spring recovers.
+  // This is what couples the drops to the blob so it stops feeling like two
+  // separate systems.
+  function pushMembrane(centerI, nx, ny, kick, n) {
+    if (kick < 0.45 || !blbs.length) return;
+    const verts = blbs[0].ps;
+    const sigma = Math.max(5, n * 0.07);
+    const K = Math.min(kick, 14);
+    for (let i = 0; i < n; i++) {
+      let d = Math.abs(i - centerI);
+      d = Math.min(d, n - d);
+      const w = Math.exp(-0.5 * (d / sigma) * (d / sigma));
+      if (w < 0.03) continue;
+      verts[i].x  += nx * K * 0.82 * w;
+      verts[i].y  += ny * K * 0.82 * w;
+      verts[i].vx += nx * K * 0.40 * w;
+      verts[i].vy += ny * K * 0.40 * w;
+    }
+  }
+
+  // Move a Verlet point without injecting velocity. Used so a finger well
+  // or tether does not get baked into the next substep as a launch.
+  function kMove(p, dx, dy) {
+    p.x += dx; p.y += dy;
+    p.px += dx; p.py += dy;
+  }
+
+  // Wrap the rim around a held drop as it nears or crosses the wall, so the
+  // ball rides in a stretched pocket instead of punching through.
+  function applyTether() {
+    if (!grabbing || !blbs.length) return;
     const verts = blbs[0].ps;
     const n = verts.length;
+    const inside = pointIn(grabbing.x, grabbing.y);
+    const hit = membraneHit(grabbing.x, grabbing.y);
+    if (inside && hit.d > grabbing.r + 40) return;
+
+    const c = blobCentroid();
+    let ax = grabbing.x - c.x, ay = grabbing.y - c.y;
+    const len = Math.hypot(ax, ay) || 1;
+    const ux = ax / len, uy = ay / len;
+    const tx = grabbing.x - ux * grabbing.r * 0.25;
+    const ty = grabbing.y - uy * grabbing.r * 0.25;
+
+    const sigma = Math.max(6, n * 0.14);
+    const pull = mode.tetherPull * 0.40;
+    for (let i = 0; i < n; i++) {
+      let d = Math.abs(i - hit.i);
+      d = Math.min(d, n - d);
+      const w = Math.exp(-0.5 * (d / sigma) * (d / sigma));
+      if (w < 0.02) continue;
+      let dx = (tx - verts[i].x) * pull * w;
+      let dy = (ty - verts[i].y) * pull * w;
+      const md = Math.hypot(dx, dy);
+      if (md > 14) { dx *= 14 / md; dy *= 14 / md; }
+      kMove(verts[i], dx, dy);
+    }
+    for (let k = 0; k < 5; k++) for (let i = jnts.length; i--;) jnts[i].upd(1);
+  }
+
+  // Finger on empty gel: a soft inward well. Kinematic, and scaled for the
+  // 20 Verlet substeps so a click cannot ram the wall into itself.
+  function applyDent(strength) {
+    if (grabbing || !blbs.length || strength < 0.02) return;
+    const verts = blbs[0].ps;
+    const n = verts.length;
+    const hit = membraneHit(mx, my);
+    const inside = pointIn(mx, my);
+    const rim = Math.max(28, evDist * 3.4);
+    // Finger on the rim used to yank verts and fight self-collision.
+    if (hit.d < rim) return;
+    let influence;
+    if (inside) {
+      const reach = Math.min(W, H) * 0.32;
+      influence = Math.max(0, 1 - hit.d / reach);
+      influence *= influence;
+    } else {
+      const band = Math.max(44, evDist * 6);
+      if (hit.d > band) return;
+      influence = 1 - hit.d / band;
+    }
+    const depth = strength * influence * mode.dentPress * 0.055;
+    if (depth < 0.02) return;
     const nx = inside ? hit.nx : -hit.nx;
     const ny = inside ? hit.ny : -hit.ny;
-    const sigma = Math.max(5, n * 0.07);
+    const sigma = Math.max(5, n * 0.08);
     for (let i = 0; i < n; i++) {
       let d = Math.abs(i - hit.i);
       d = Math.min(d, n - d);
       const w = Math.exp(-0.5 * (d / sigma) * (d / sigma));
       if (w < 0.03) continue;
-      verts[i].x  += nx * 6.5 * w;
-      verts[i].y  += ny * 6.5 * w;
-      verts[i].vx += nx * strength * w;
-      verts[i].vy += ny * strength * w;
+      kMove(verts[i], nx * depth * w, ny * depth * w);
     }
   }
 
-  // Click: gust from inside/outside, pluck if you're on the skin.
-  function pushBlob(px, py) {
+  function angleToMidi(px, py) {
+    const c = blobCentroid();
+    const t = (Math.atan2(py - c.y, px - c.x) + Math.PI) / (Math.PI * 2);
+    const scale = PALETTES[currentPalette];
+    return scale[Math.floor(t * scale.length) % scale.length];
+  }
+
+  function onPress(px, py) {
     spawnGustRipple(px, py);
-    const hit = membraneHit(px, py);
-    const band = Math.max(36, evDist * 5);
-    const onEdge = hit.d < band;
-    const inside = pointIn(px, py);
-    const closeness = onEdge ? 1 - hit.d / band : 0;
-
-    spawnEdgeWave(px, py, 205, 4.2 + closeness * 3.5);
-
-    if (onEdge) {
-      pluckEdge(hit, inside, 16 + closeness * 14);
-      gusts.push({ px, py, str: 900*TENS * (1 - closeness * 0.7), life: GUST_FRAMES });
-    } else {
-      gusts.push({ px, py, str: 3000*TENS, life: GUST_FRAMES });
-    }
-
-    for (const nuc of nuclei) {
-      const dx = nuc.x - px, dy = nuc.y - py;
-      const d = Math.hypot(dx, dy);
-      if (d < 1 || d > 160) continue;
-      const f = (1 - d / 160) ** 2 * 0.5;
-      nuc.vx += (dx / d) * f;
-      nuc.vy += (dy / d) * f;
-    }
   }
 
-  function yieldToCursor(p, ox, oy, or, k) {
-    const dx = p.x - ox, dy = p.y - oy;
-    const d2 = dx*dx + dy*dy;
-    const cr = or + p.r;
-    if (d2 >= cr*cr || d2 < 1e-8) return;
-    const d = Math.sqrt(d2);
-    const m = (cr - d) * k;
-    p.move(dx / d * m, dy / d * m);
+  function maybeStrokeNote() {
+    if (!pointerDown || grabbing || !blbs.length) return;
+    const hit = membraneHit(mx, my);
+    const band = Math.max(40, evDist * 5);
+    if (hit.d > band && !pointIn(mx, my)) return;
+    if (hit.d > band * 0.55 && pointIn(mx, my)) return;
+    const spd = Math.hypot(mxd - mx, myd - my);
+    if (spd < 0.7) return;
+    const now = performance.now();
+    if (now - lastStrokeAt < 130) return;
+    lastStrokeAt = now;
+    playNote(angleToMidi(mx, my), 0.028, 0.42);
   }
 
   function canvasPos(e) {
@@ -502,38 +903,161 @@
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
+  function pushVel(x, y) {
+    const t = performance.now();
+    velHist.push({ x, y, t });
+    if (velHist.length > 4) velHist.shift();
+  }
+
+  function releaseVelocity() {
+    if (velHist.length < 2) return { vx: 0, vy: 0 };
+    const a = velHist[0], b = velHist[velHist.length - 1];
+    const dt = Math.max(16, b.t - a.t);
+    let vx = (b.x - a.x) / dt * 16;
+    let vy = (b.y - a.y) / dt * 16;
+    const spd = Math.hypot(vx, vy);
+    const cap = Math.max(3.4, mode.cap * 0.72);
+    if (spd > cap) { vx *= cap / spd; vy *= cap / spd; }
+    return { vx, vy };
+  }
+
+  // Slingshot: the further you pulled the drop from the cell's core, the harder
+  // it snaps back through the middle — straight into the pack, then ricochets
+  // off the wall (which now dents). Your throw direction adds fine aim.
+  function seatNucleus(nuc) {
+    if (!blbs.length || pointIn(nuc.x, nuc.y)) return;
+    const verts = blbs[0].ps;
+    let minDist = Infinity, bestNx = 0, bestNy = 1;
+    for (let vi = 0; vi < verts.length; vi++) {
+      const v = verts[vi];
+      const cp = closestPtOnSeg(nuc.x, nuc.y, v.x, v.y, v.n.x, v.n.y);
+      const dx = nuc.x - cp.x, dy = nuc.y - cp.y;
+      const d = Math.hypot(dx, dy);
+      if (d < minDist) {
+        minDist = d;
+        if (d > 0.001) { bestNx = dx / d; bestNy = dy / d; }
+      }
+    }
+    nuc.x -= bestNx * (minDist + nuc.r + 6);
+    nuc.y -= bestNy * (minDist + nuc.r + 6);
+  }
+
+  function flingGrabbed() {
+    if (!grabbing) return;
+    const flick = releaseVelocity();
+    const anchor = grabAnchor || blobCentroid();
+    const dx = anchor.x - grabbing.x, dy = anchor.y - grabbing.y;
+    const stretch = Math.hypot(dx, dy) || 1;
+    const nxs = dx / stretch, nys = dy / stretch;
+    const tension = Math.min(stretch, Math.min(W, H) * mode.maxStretch);
+    const flickSpd = Math.hypot(flick.vx, flick.vy);
+    const heldSpd = Math.hypot(grabbing.vx, grabbing.vy);
+    if (tension < 24 && flickSpd < 0.7 && heldSpd < 0.9) {
+      grabbing.vx *= 0.45;
+      grabbing.vy *= 0.45;
+      grabbing.held = false;
+      grabbing.grace = 0;
+      grabbing = null;
+      grabAnchor = null;
+      return;
+    }
+    const power = tension * mode.slingK;
+    grabbing.vx = nxs * power + flick.vx * mode.flick + grabbing.vx * 0.62;
+    grabbing.vy = nys * power + flick.vy * mode.flick + grabbing.vy * 0.62;
+    let spd = Math.hypot(grabbing.vx, grabbing.vy);
+    if (spd > mode.cap) { grabbing.vx *= mode.cap / spd; grabbing.vy *= mode.cap / spd; spd = mode.cap; }
+    if (spd > 1.2) playNote(grabbing.midi, Math.min(0.14, 0.04 + spd * 0.018), 0.85);
+    seatNucleus(grabbing);
+    grabbing.grace = 12;
+    const hit = membraneHit(grabbing.x, grabbing.y);
+    pushMembrane(hit.i, nxs, nys, Math.min(8, power * 0.55), blbs[0] ? blbs[0].ps.length : 0);
+    grabbing.held = false;
+    grabbing = null;
+    grabAnchor = null;
+  }
+
   function setupInput() {
     canvas.addEventListener('pointermove', e => {
       const p = canvasPos(e);
       mxd = p.x; myd = p.y;
+      pointerOver = true;
+      if (pointerDown) {
+        pushVel(p.x, p.y);
+        maybeStrokeNote();
+      }
+    });
+    canvas.addEventListener('pointerenter', () => { pointerOver = true; });
+    canvas.addEventListener('pointerleave', () => {
+      pointerOver = false;
+      if (!pointerDown) hover = 0;
     });
     canvas.addEventListener('pointerdown', e => {
       e.preventDefault();
-      canvas.setPointerCapture(e.pointerId);
+      try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
       const p = canvasPos(e);
       mx = mxd = p.x;
       my = myd = p.y;
       pointerDown = true;
-      pushBlob(p.x, p.y);
-    });
-    canvas.addEventListener('pointerup', () => { pointerDown = false; });
-    canvas.addEventListener('pointercancel', () => { pointerDown = false; });
-    document.addEventListener('keydown', e => {
-      if(e.code==='KeyR') { scatterNuclei(); return; }
-      const n = parseInt(e.key);
-      if(n>=1 && n<=5) {
-        currentPalette = n-1;
-        nuclei.forEach((nuc,i) => { nuc.midi = PALETTES[currentPalette][i]; });
+      pointerOver = true;
+      velHist = [{ x: p.x, y: p.y, t: performance.now() }];
+      grabbing = pickGrab(p.x, p.y);
+      if (grabbing) {
+        grabbing.held = true;
+        grabAnchor = blobCentroid();
+        playNote(grabbing.midi, 0.03, 0.35);
       }
+      onPress(p.x, p.y);
+    });
+    canvas.addEventListener('pointerup', () => {
+      if (grabbing) flingGrabbed();
+      pointerDown = false;
+      velHist = [];
+    });
+    canvas.addEventListener('pointercancel', () => {
+      if (grabbing) { grabbing.held = false; grabbing = null; }
+      grabAnchor = null;
+      pointerDown = false;
+      velHist = [];
+    });
+    document.addEventListener('keydown', e => {
+      if (e.code === 'KeyR') { scatterNuclei(); return; }
+      if (e.code === 'KeyZ') { setMode('tow'); return; }
+      if (e.code === 'KeyX') { setMode('lead'); return; }
+      if (e.code === 'KeyC') { setMode('soak'); return; }
+      const n = parseInt(e.key);
+      if (n >= 1 && n <= 5) {
+        currentPalette = n - 1;
+        nuclei.forEach((nuc, i) => { nuc.midi = PALETTES[currentPalette][i]; });
+      }
+    });
+    const group = document.getElementById('modes');
+    group.addEventListener('pointerdown', e => e.stopPropagation());
+    group.addEventListener('click', e => {
+      const btn = e.target.closest('[data-mode]');
+      if (btn) setMode(btn.dataset.mode);
     });
   }
 
   // ─── Draw ─────────────────────────────────────────────────────────────────
+  function drawSmoothBlob(pts) {
+    const n = pts.length;
+    const mx0 = (pts[n-1].x + pts[0].x) * 0.5;
+    const my0 = (pts[n-1].y + pts[0].y) * 0.5;
+    ctx.beginPath();
+    ctx.moveTo(mx0, my0);
+    for (let i = 0; i < n; i++) {
+      const p = pts[i];
+      const q = pts[(i + 1) % n];
+      ctx.quadraticCurveTo(p.x, p.y, (p.x + q.x) * 0.5, (p.y + q.y) * 0.5);
+    }
+    ctx.closePath();
+  }
+
   function draw() {
-    ctx.fillStyle = 'rgba(8,12,20,0.20)';
+    ctx.fillStyle = 'rgba(8,12,20,0.22)';
     ctx.fillRect(0, 0, W, H);
 
-    if(blbs.length) {
+    if (blbs.length) {
       const verts = blbs[0].ps;
       const n = verts.length;
       const pts = new Array(n);
@@ -547,19 +1071,78 @@
         pts[i] = { x: v.x + nx * e.d, y: v.y + ny * e.d, d: e.d, hue: e.hue };
       }
 
-      ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      for (let i = 1; i < n; i++) ctx.lineTo(pts[i].x, pts[i].y);
-      ctx.closePath();
-      ctx.fillStyle = 'rgba(160,196,255,0.07)';
+      const c = blobCentroid();
+      const rad = blbs[0].r;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.save();
+      drawSmoothBlob(pts);
+      ctx.clip();
+      drawSmoothBlob(pts);
+      ctx.fillStyle = 'rgba(16, 32, 48, 0.62)';
       ctx.fill();
-      ctx.strokeStyle = 'rgba(232,234,240,0.48)';
-      ctx.lineWidth = 1.5;
+      const gel = ctx.createRadialGradient(
+        c.x - rad * 0.18, c.y - rad * 0.22, rad * 0.08,
+        c.x, c.y, rad * 1.08
+      );
+      gel.addColorStop(0, 'rgba(186,214,255,0.10)');
+      gel.addColorStop(0.48, 'rgba(40, 78, 108, 0.08)');
+      gel.addColorStop(1, 'rgba(10, 22, 34, 0.16)');
+      ctx.fillStyle = gel;
+      ctx.fill();
+      drawSkin();
+      if (contact > 0.04) {
+        const src = grabbing || { x: mx, y: my };
+        const wrad = 36 + contact * 28 * (0.45 + mode.well * 0.55);
+        const well = ctx.createRadialGradient(src.x, src.y, 0, src.x, src.y, wrad);
+        well.addColorStop(0, `rgba(4, 10, 18, ${0.38 * contact * (0.5 + mode.well * 0.5)})`);
+        well.addColorStop(0.40, `hsla(198, 62%, 42%, ${0.14 * contact})`);
+        well.addColorStop(0.72, `hsla(214, 70%, 72%, ${0.16 * contact})`);
+        well.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = well;
+        ctx.beginPath();
+        ctx.arc(src.x, src.y, wrad, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Soft inner rim so cell stairs never meet the clip.
+      drawSmoothBlob(pts);
+      ctx.strokeStyle = 'rgba(16, 32, 48, 0.78)';
+      ctx.lineWidth = 5;
+      ctx.stroke();
+      ctx.restore();
+
+      if (grabbing && mode.filament && grabbing.hold > 0.08) {
+        const dx = mx - grabbing.x, dy = my - grabbing.y;
+        const stretch = Math.hypot(dx, dy);
+        if (stretch > 8) {
+          const midX = grabbing.x + dx * 0.46;
+          const midY = grabbing.y + dy * 0.46;
+          ctx.save();
+          ctx.beginPath();
+          ctx.moveTo(grabbing.x, grabbing.y);
+          ctx.quadraticCurveTo(midX, midY, mx, my);
+          ctx.strokeStyle = `hsla(${grabbing.hue}, 80%, 70%, ${0.22 * grabbing.hold})`;
+          ctx.lineWidth = 2.4 + grabbing.hold * 1.6;
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(grabbing.x, grabbing.y);
+          ctx.quadraticCurveTo(midX, midY, mx, my);
+          ctx.strokeStyle = `hsla(${grabbing.hue}, 90%, 86%, ${0.34 * grabbing.hold})`;
+          ctx.lineWidth = 0.9;
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+
+      drawSmoothBlob(pts);
+      ctx.strokeStyle = 'rgba(220, 210, 255, 0.42)';
+      ctx.lineWidth = 1.35;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
       ctx.stroke();
 
-      // Slow glow traveling along the membrane
       for (let i = 0; i < n; i++) {
-        if (pts[i].d < 0.7) continue;
+        if (pts[i].d < 1.6) continue;
         const a = Math.min(1, pts[i].d / 6) * 0.42;
         ctx.save();
         ctx.shadowColor = `hsl(${pts[i].hue},75%,68%)`;
@@ -572,31 +1155,22 @@
         ctx.restore();
       }
 
-      // Gust rings — a poke spreading through the gel
       for (const rp of gustRipples) {
         const t = 1 - rp.r / rp.maxR;
         ctx.beginPath();
         ctx.arc(rp.x, rp.y, rp.r, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(160,196,255,${0.20 * t * t})`;
-        ctx.lineWidth = 1.15;
+        ctx.strokeStyle = `rgba(160,196,255,${0.18 * t * t})`;
+        ctx.lineWidth = 1.1;
         ctx.stroke();
-        if (rp.r > 14) {
-          ctx.beginPath();
-          ctx.arc(rp.x, rp.y, rp.r * 0.58, 0, Math.PI * 2);
-          ctx.strokeStyle = `rgba(160,196,255,${0.08 * t})`;
-          ctx.lineWidth = 1;
-          ctx.stroke();
-        }
       }
 
-      // Proximity aura — wall glows as nucleus approaches
-      for(const nuc of nuclei) {
-        if(!nuc.wallPt || nuc.wallDist > 75) continue;
-        const prox = 1 - nuc.wallDist/75;
+      for (const nuc of nuclei) {
+        if (!nuc.wallPt || nuc.wallDist > 70) continue;
+        const prox = 1 - nuc.wallDist / 70;
         ctx.save();
         ctx.shadowColor = `hsl(${nuc.hue},80%,65%)`;
-        ctx.shadowBlur  = 14;
-        ctx.globalAlpha = prox * 0.32;
+        ctx.shadowBlur  = 12;
+        ctx.globalAlpha = prox * 0.28;
         ctx.fillStyle   = `hsl(${nuc.hue},85%,70%)`;
         ctx.beginPath();
         ctx.arc(nuc.wallPt.x, nuc.wallPt.y, 3, 0, Math.PI*2);
@@ -604,55 +1178,48 @@
         ctx.restore();
       }
 
-      // Wall flash spots — linger after collision
-      for(const wf of wallFlashes) {
+      for (const wf of wallFlashes) {
         const t = wf.life / wf.maxLife;
         ctx.save();
         ctx.shadowColor = `hsl(${wf.hue},80%,70%)`;
-        ctx.shadowBlur  = 16 * t;
-        ctx.globalAlpha = t * 0.5;
+        ctx.shadowBlur  = 14 * t;
+        ctx.globalAlpha = t * 0.48;
         ctx.fillStyle   = `hsl(${wf.hue},85%,74%)`;
         ctx.beginPath();
-        ctx.arc(wf.x, wf.y, 4 * (0.55+t*0.45), 0, Math.PI*2);
+        ctx.arc(wf.x, wf.y, 4 * (0.55 + t * 0.45), 0, Math.PI*2);
         ctx.fill();
         ctx.restore();
       }
     }
 
-    // Nucleus comet trails
-    for(const nuc of nuclei) {
-      const TL = nuc.trail.length;
-      for(let k=0;k<TL;k++){
-        const frac = (k+1)/TL;
-        ctx.globalAlpha = frac * 0.30;
-        ctx.fillStyle   = `hsl(${nuc.hue},80%,65%)`;
-        ctx.beginPath();
-        ctx.arc(nuc.trail[k].x, nuc.trail[k].y, nuc.r * frac * 0.65, 0, Math.PI*2);
-        ctx.fill();
-      }
-      ctx.globalAlpha = 1;
-    }
-
-    // Nuclei
-    for(const nuc of nuclei) {
+    for (const nuc of nuclei) {
       const flashing = nuc.flash > 0;
+      const s = 1 + nuc.hold * 0.12;
+      const r = nuc.r * s * (flashing ? 1.12 : 1);
       ctx.save();
       ctx.shadowColor = `hsl(${nuc.hue},85%,65%)`;
-      ctx.shadowBlur  = flashing ? 20 : 12;
-      ctx.fillStyle   = `hsl(${nuc.hue},88%,${flashing?74:66}%)`;
-      ctx.globalAlpha = flashing ? 0.96 : 0.86;
+      ctx.shadowBlur  = flashing ? 22 : 14 + nuc.hold * 8;
+      ctx.fillStyle   = `hsl(${nuc.hue},88%,${flashing ? 74 : 66}%)`;
+      ctx.globalAlpha = flashing ? 0.96 : 0.88;
       ctx.beginPath();
-      ctx.arc(nuc.x, nuc.y, nuc.r * (flashing ? 1.16 : 1), 0, Math.PI*2);
+      ctx.arc(nuc.x, nuc.y, r, 0, Math.PI*2);
+      ctx.fill();
+      ctx.globalAlpha = 0.35;
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.beginPath();
+      ctx.arc(nuc.x - r * 0.28, nuc.y - r * 0.32, r * 0.32, 0, Math.PI*2);
       ctx.fill();
       ctx.restore();
     }
 
-    // Contact ring grows with the hold, so a press reads as a settle, not a pop
-    if (contact > 0.02) {
-      const u = contact * contact * (3 - 2 * contact);
+    const touch = Math.max(contact, hover * 0.55);
+    if (touch > 0.02) {
+      const u = touch * touch * (3 - 2 * touch);
+      const rad = grabbing ? grabbing.r * 1.8 : (18 + 10 * contact);
       ctx.beginPath();
-      ctx.arc(mx, my, bs * u, 0, Math.PI*2);
-      ctx.strokeStyle = `rgba(232,234,240,${0.18 * u})`;
+      ctx.arc(mx, my, rad * u, 0, Math.PI*2);
+      ctx.strokeStyle = `rgba(232,234,240,${0.16 * u})`;
       ctx.lineWidth = 1;
       ctx.stroke();
     }
@@ -666,51 +1233,122 @@
     prev = t;
 
     clock += dt * 1000;
-    mx += (mxd-mx)*0.15;
-    my += (myd-my)*0.15;
+    mx += (mxd - mx) * (pointerDown ? (grabbing ? 0.50 : 0.84) : 0.22);
+    my += (myd - my) * (pointerDown ? (grabbing ? 0.50 : 0.84) : 0.22);
 
-    const tau = pointerDown ? 0.18 : 0.13;
-    contact += ((pointerDown ? 1 : 0) - contact) * (1 - Math.exp(-dt / tau));
+    const inside = blbs.length ? pointIn(mx, my) : false;
+    const hit = blbs.length ? membraneHit(mx, my) : { d: Infinity };
+    const band = Math.max(44, evDist * 6);
+    const nearSkin = hit.d < band || inside;
+    const wantHover = false;
+    const wantStir  = pointerDown && inside && !grabbing;
+
+    const tauIn  = 0.07;
+    const tauOut = 0.15;
+    contact += ((pointerDown ? 1 : 0) - contact) * (1 - Math.exp(-dt / (pointerDown ? tauIn : tauOut)));
+    hover   += ((wantHover ? 1 : 0) - hover)   * (1 - Math.exp(-dt / 0.12));
+    stir    += ((wantStir  ? 1 : 0) - stir)    * (1 - Math.exp(-dt / (wantStir ? 0.10 : 0.18)));
     if (!pointerDown && contact < 0.012) contact = 0;
 
-    updateWaves(dt);
-    for(let i=parts.length;i--;) parts[i].updC();
-
-    // Radial gust: push blob particles outward from click point
-    for(let g=gusts.length;g--;){
-      const gust=gusts[g]; gust.life--;
-      const fade=(gust.life/GUST_FRAMES)**2;
-      if(gust.life<=0){gusts.splice(g,1);continue;}
-      for(let i=parts.length;i--;){
-        const p=parts[i];
-        const dx=p.x-gust.px, dy=p.y-gust.py;
-        const d=Math.sqrt(dx*dx+dy*dy);
-        if(d<1||d>Math.min(W,H)*0.7)continue;
-        const nx=dx/d, ny=dy/d;
-        const falloff=(1-d/(Math.min(W,H)*0.7))**2;
-        p.vx+=nx*gust.str*falloff*fade*dt;
-        p.vy+=ny*gust.str*falloff*fade*dt;
+    if (skinH) {
+      if (pointerDown && (inside || hit.d < band)) {
+        const src = grabbing || { x: mx, y: my };
+        pokeSkin(src.x, src.y, (0.35 + contact * 0.55) * mode.well, 46 + contact * 16, dt);
+        const spd = Math.hypot(mxd - mx, myd - my);
+        if (spd > 0.5) pokeSkin(mx - (mxd - mx), my - (myd - my), 0.22, 52, dt);
       }
+      // Balls stamp the film unlike a finger: hills / wake, or small dimples.
+      const skinAmt = mode.ballSkin;
+      if (skinAmt) {
+        for (const nuc of nuclei) {
+          if (nuc.held) continue;
+          const spd = Math.hypot(nuc.vx, nuc.vy);
+          const sig = 18 + nuc.r * 1.1;
+          pokeSkin(nuc.x, nuc.y, -skinAmt * (0.32 + Math.min(0.55, spd * 0.12)), sig, dt, 24);
+          if (skinAmt > 0 && spd > 0.7) {
+            pokeSkin(nuc.x - nuc.vx * 5, nuc.y - nuc.vy * 5, -skinAmt * 0.18, sig * 1.25, dt, 18);
+          }
+        }
+      }
+      const well = updateSkin(dt);
+      depthSmoothed += ((contact * 0.7 + well * 0.55) - depthSmoothed) * (1 - Math.exp(-dt / 0.11));
     }
 
-    const sdt=dt/20;
-    for(let s=20;s--;){
-      for(let i=blbs.length;i--;){const b=blbs[i];b.ca=geo.polyArea(b.ps);b.ad=(b.ar-b.ca)/b.ar;}
-      for(let i=parts.length;i--;){const p=parts[i];p.addF(0,1000*sdt);const v=geo.limit({x:p.vx,y:p.vy},(evDist/sdt)*2);p.vx=v.x;p.vy=v.y;p.upd(sdt);}
-      for(let i=parts.length;i--;){const p=parts[i];const ln=geo.lineNormal(p.p.x,p.p.y,p.n.x,p.n.y);const d=p.parent.ad*INFL;p.move(ln.x*d,ln.y*d);}
-      for(let i=jnts.length;i--;) jnts[i].upd(1);
-      for(let i=parts.length;i--;){const p=parts[i];grid.q(p.x,p.y,p.r).forEach(o=>{if(o===p||o===p.n||o===p.p)return;const f=p.testCol(o.x,o.y,o.r);if(f){p.move(f.x*0.5,f.y*0.5);o.move(-f.x*0.5,-f.y*0.5);}});}
-      for(let i=parts.length;i--;){
+    if (voice && audioCtx) {
+      const now = audioCtx.currentTime;
+      const held = pointerDown;
+      const midi = Audio.noteFromY(my, H, 'wholeTone', 2, 62);
+      const freq = 440 * Math.pow(2, (midi - 69) / 12);
+      voice.osc.frequency.setTargetAtTime(freq, now, 0.09);
+      voice.harm.frequency.setTargetAtTime(freq * (2.01 + roughSmoothed * 0.9), now, 0.11);
+      voice.hg.gain.setTargetAtTime(0.04 + roughSmoothed * 0.35 + stir * 0.08, now, 0.12);
+      voice.filt.frequency.setTargetAtTime(480 + depthSmoothed * 900 + roughSmoothed * 1200, now, 0.14);
+      voice.filt.Q.setTargetAtTime(0.85 + depthSmoothed * 1.3 + roughSmoothed * 2.0, now, 0.14);
+      const amp = held ? 0.028 + depthSmoothed * 0.06 : 0.005 + depthSmoothed * 0.016 + hover * 0.008;
+      voice.g.gain.setTargetAtTime(amp, now, held ? 0.07 : 0.32);
+    }
+
+    if (blbs.length && !reduceMotion) {
+      const breath = 1 + Math.sin(clock * 0.00105) * 0.016;
+      blbs[0].ar = blbs[0].baseAr * breath;
+    }
+
+    updateWaves(dt);
+    for (let i=parts.length;i--;) parts[i].updC();
+
+    const sdt = dt / 20;
+    const dent = contact * 0.92;
+    for (let s=20;s--;){
+      for (let i=blbs.length;i--;){ const b=blbs[i]; b.ca=geo.polyArea(b.ps); b.ad=(b.ar-b.ca)/b.ar; }
+      for (let i=parts.length;i--;){
         const p=parts[i];
-        if(contact > 0.02) {
-          const u = contact * contact * (3 - 2 * contact);
-          yieldToCursor(p, mx, my, (bs + bm) * u, 0.10 * u);
-        }
+        p.addF(0, 280 * sdt);
+        const v=geo.limit({x:p.vx,y:p.vy},(evDist/sdt)*2);
+        p.vx=v.x; p.vy=v.y; p.upd(sdt);
+      }
+      for (let i=parts.length;i--;){
+        const p=parts[i];
+        const ln=geo.lineNormal(p.p.x,p.p.y,p.n.x,p.n.y);
+        const d=p.parent.ad*INFL;
+        p.move(ln.x*d, ln.y*d);
+      }
+      for (let i=jnts.length;i--;) jnts[i].upd(1);
+      for (let i=parts.length;i--;){
+        const p=parts[i];
+        grid.q(p.x,p.y,p.r).forEach(o=>{
+          if (o===p) return;
+          let q = p.n;
+          let ring = false;
+          for (let k = 0; k < 3 && q; k++) { if (q === o) { ring = true; break; } q = q.n; }
+          if (!ring) {
+            q = p.p;
+            for (let k = 0; k < 3 && q; k++) { if (q === o) { ring = true; break; } q = q.p; }
+          }
+          if (ring) return;
+          const f=p.testCol(o.x,o.y,o.r);
+          if (f){ p.move(f.x*0.5,f.y*0.5); o.move(-f.x*0.5,-f.y*0.5); }
+        });
+      }
+      applyDent(dent);
+      for (let i=parts.length;i--;){
+        const p=parts[i];
         p.con(0,0,W,H); p.end(sdt);
       }
     }
 
-    updateNuclei();
+    // Keep the cell in the dish without fighting the local dent.
+    if (parts.length) {
+      const c = blobCentroid();
+      const hx = (W * 0.5  - c.x) * 0.045;
+      const hy = (H * 0.52 - c.y) * 0.045;
+      if (Math.abs(hx) > 0.02 || Math.abs(hy) > 0.02) {
+        for (const p of parts) p.move(hx, hy);
+        for (const nuc of nuclei) { nuc.x += hx; nuc.y += hy; }
+      }
+    }
+
+    updateNuclei(dt);
+    applyTether();
     draw();
     requestAnimationFrame(loop);
   }
@@ -718,33 +1356,53 @@
   // ─── Begin gate ───────────────────────────────────────────────────────────
   const beginEl = document.getElementById('begin');
 
-  function begin() {
+  function begin(e) {
     initAudio();
     setupCanvas();
 
-    const mob = Math.min(W,H) < 600;
-    bs  = Math.min(W,H) * (mob ? 0.09 : 0.07);
-    bm  = mob ? 60 : 100;
     mx  = mxd = W/2;
     my  = myd = H/2;
 
     initBlob();
+    initSkin();
     initNuclei();
     setupInput();
+    try {
+      const saved = sessionStorage.getItem('slosh-mode');
+      if (saved) setMode(saved);
+    } catch (_) {}
+    document.getElementById('modes').dataset.on = '1';
 
     window.addEventListener('resize', () => {
       setupCanvas();
-      const m = Math.min(W,H) < 600;
-      bs = Math.min(W,H) * (m ? 0.09 : 0.07);
-      bm = m ? 60 : 100;
       mx = mxd = W/2; my = myd = H/2;
       initBlob();
+      initSkin();
       initNuclei();
+      grabbing = null;
+      grabAnchor = null;
+      pointerDown = false;
     });
 
     beginEl.style.opacity = '0';
     beginEl.style.pointerEvents = 'none';
     setTimeout(() => beginEl.remove(), 700);
+
+    if (e) {
+      const p = canvasPos(e);
+      mx = mxd = p.x;
+      my = myd = p.y;
+      pointerDown = true;
+      velHist = [{ x: p.x, y: p.y, t: performance.now() }];
+      grabbing = pickGrab(p.x, p.y);
+      if (grabbing) {
+        grabbing.held = true;
+        grabAnchor = blobCentroid();
+        playNote(grabbing.midi, 0.03, 0.35);
+      }
+      onPress(p.x, p.y);
+      try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+    }
 
     requestAnimationFrame(loop);
   }
