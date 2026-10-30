@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>4d</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%;
+      background: #080c14;
+      color: rgba(232, 234, 240, 0.55);
+      font: 400 11px/1.6 system-ui, sans-serif;
+      letter-spacing: 0.14em;
+      text-transform: lowercase;
+      overflow: hidden;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    body { display: grid; place-items: center; cursor: grab; }
+    body.dragging { cursor: grabbing; }
+    body.over::after {
+      content: '';
+      position: fixed; inset: 12px;
+      border: 1px dashed rgba(160, 196, 255, 0.45);
+      pointer-events: none;
+    }
+
+    .scene { perspective: 1400px; }
+    .cube  { position: relative; transform-style: preserve-3d; }
+    .cube > * { position: absolute; left: 50%; top: 50%; pointer-events: none; }
+    .face  { border: 1px solid rgba(160, 196, 255, 0.16); }
+    .slice { display: block; }
+    .slice.now { outline: 1px solid rgba(160, 196, 255, 0.6); }
+
+    .ui { position: fixed; left: 18px; top: 16px; display: flex; flex-direction: column; gap: 4px; z-index: 2; }
+    .ui b { font-weight: 400; font-size: 14px; letter-spacing: 0.32em; color: rgba(232, 234, 240, 0.9); }
+    .ui .row { display: flex; gap: 6px; margin-top: 6px; }
+    .ui button {
+      appearance: none;
+      padding: 8px 12px;
+      border: 1px solid rgba(160, 196, 255, 0.16);
+      background: transparent;
+      color: rgba(232, 234, 240, 0.7);
+      font: inherit; letter-spacing: inherit; text-transform: inherit;
+      cursor: pointer;
+    }
+    .ui button:hover { background: rgba(160, 196, 255, 0.1); }
+    #status { min-height: 1.6em; color: rgba(160, 196, 255, 0.8); }
+
+    .panel {
+      position: fixed;
+      right: 16px; top: 16px; bottom: 40px;
+      width: 188px;
+      display: flex; flex-direction: column; gap: 11px;
+      overflow: auto;
+      z-index: 3;
+      cursor: default;
+    }
+    .panel h2 {
+      font: inherit; font-size: 9px; letter-spacing: 0.28em;
+      color: rgba(160, 196, 255, 0.45);
+      margin-top: 4px;
+    }
+    .panel label {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: baseline;
+      gap: 0 8px;
+    }
+    .panel i { font-style: normal; color: rgba(232, 234, 240, 0.82); font-variant-numeric: tabular-nums; }
+    .panel input[type=range] {
+      grid-column: 1 / -1;
+      width: 100%;
+      height: 18px;
+      margin-top: 2px;
+      accent-color: #a0c4ff;
+      cursor: pointer;
+    }
+
+    .time { position: fixed; left: 18px; right: 220px; bottom: 18px; height: 1px; background: rgba(160, 196, 255, 0.14); }
+    .time i { position: absolute; top: -2px; width: 5px; height: 5px; background: #a0c4ff; transform: translateX(-50%); }
+  </style>
+</head>
+<body>
+  <div class="scene"><div class="cube" id="cube"></div></div>
+
+  <div class="ui">
+    <b>4d</b>
+    <span>x·y = space, z = time</span>
+    <span>drag rotates · scroll moves time · drop any video</span>
+    <div class="row">
+      <button id="open">open video</button>
+      <button id="cam">webcam 3s</button>
+    </div>
+    <span id="status"></span>
+  </div>
+
+  <aside class="panel" id="panel"></aside>
+  <div class="time"><i id="marker"></i></div>
+  <input type="file" id="file" accept="video/*" hidden>
+
+  <script>
+  'use strict';
+
+  const N = 64;
+  const RES = 320;
+
+  const P = {
+    now: N / 2,
+    present: 100,
+    pastNear: 32,
+    pastFar: 10,
+    futureNear: 6,
+    futureFar: 2,
+    trail: 50,
+    depth: 110,
+    ghost: 0,
+  };
+
+  const SPEC = [
+    ['time', [
+      ['now', 'now', 0, N - 1, 0.1],
+      ['present', 'present %', 0, 100, 1],
+    ]],
+    ['past', [
+      ['pastNear', 'near %', 0, 100, 1],
+      ['pastFar', 'far %', 0, 100, 1],
+    ]],
+    ['future', [
+      ['futureNear', 'near %', 0, 100, 1],
+      ['futureFar', 'far %', 0, 100, 1],
+    ]],
+    ['volume', [
+      ['trail', 'trail', 0, 100, 1],
+      ['depth', 'depth', 40, 240, 1],
+      ['ghost', 'ghost', 0, 100, 1],
+    ]],
+  ];
+
+  const cube = document.getElementById('cube');
+  const marker = document.getElementById('marker');
+  const status = document.getElementById('status');
+  const once = (el, ev) => new Promise(r => el.addEventListener(ev, r, { once: true }));
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const fmt = (k, v) => k === 'now' ? v.toFixed(0) : String(Math.round(v));
+
+  let slices = [];
+  let originals = [];      // raw ImageData per slice, so ghost can be retuned
+  let faces = [];
+  let aspect = 1;
+  let t = P.now;
+  let rx = -18, ry = 34;
+  let job = 0;
+  const sliderEls = {};
+
+  const panel = document.getElementById('panel');
+  for (const [group, rows] of SPEC) {
+    const h = document.createElement('h2');
+    h.textContent = group;
+    panel.appendChild(h);
+    for (const [key, label, min, max, step] of rows) {
+      const el = document.createElement('label');
+      el.innerHTML = `<span>${label}</span><i>${fmt(key, P[key])}</i><input type="range" min="${min}" max="${max}" step="${step}" value="${P[key]}">`;
+      const input = el.querySelector('input');
+      sliderEls[key] = { input, i: el.querySelector('i') };
+      input.addEventListener('input', () => {
+        P[key] = +input.value;
+        sliderEls[key].i.textContent = fmt(key, P[key]);
+        if (key === 'now') t = P.now;
+        if (key === 'ghost') applyGhost();
+        if (key === 'depth') layout();
+        paint();
+      });
+      panel.appendChild(el);
+    }
+  }
+
+  function setSlider(key, v) {
+    P[key] = v;
+    const s = sliderEls[key];
+    if (!s) return;
+    s.input.value = v;
+    s.i.textContent = fmt(key, v);
+  }
+
+  function layout() {
+    if (!slices.length) return;
+    const W = Math.min(innerWidth, innerHeight) * 0.42;
+    const H = W / aspect;
+    const D = W * (P.depth / 100);
+    cube.style.width = W + 'px';
+    cube.style.height = H + 'px';
+    const tfs = [
+      `translateZ(${D / 2}px)`,
+      `translateZ(${-D / 2}px)`,
+      `rotateY(90deg) translateZ(${W / 2}px)`,
+      `rotateY(-90deg) translateZ(${W / 2}px)`,
+      `rotateX(90deg) translateZ(${H / 2}px)`,
+      `rotateX(-90deg) translateZ(${H / 2}px)`,
+    ];
+    const sizes = [[W, H], [W, H], [D, H], [D, H], [W, D], [W, D]];
+    faces.forEach((f, i) => {
+      f.style.width = sizes[i][0] + 'px';
+      f.style.height = sizes[i][1] + 'px';
+      f.style.transform = `translate(-50%,-50%) ${tfs[i]}`;
+    });
+    slices.forEach((c, i) => {
+      const z = -D / 2 + D * i / (N - 1);
+      c.style.width = W + 'px';
+      c.style.height = H + 'px';
+      c.style.transform = `translate(-50%,-50%) translateZ(${z}px)`;
+    });
+  }
+
+  function build(nextAspect) {
+    aspect = nextAspect;
+    cube.innerHTML = '';
+    faces = [];
+    slices = [];
+    originals = [];
+    for (let i = 0; i < 6; i++) {
+      const f = document.createElement('div');
+      f.className = 'face';
+      cube.appendChild(f);
+      faces.push(f);
+    }
+    for (let i = 0; i < N; i++) {
+      const c = document.createElement('canvas');
+      c.className = 'slice';
+      c.width = RES;
+      c.height = Math.round(RES / aspect);
+      cube.appendChild(c);
+      slices.push(c);
+    }
+    layout();
+    orient();
+    paint();
+  }
+
+  function capture(i) {
+    const c = slices[i];
+    originals[i] = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+    if (P.ghost) ghostSlice(i);
+  }
+
+  function ghostSlice(i) {
+    const src = originals[i];
+    if (!src) return;
+    const ctx = slices[i].getContext('2d');
+    const g = P.ghost / 100;
+    if (g === 0) { ctx.putImageData(src, 0, 0); return; }
+    const img = new ImageData(new Uint8ClampedArray(src.data), src.width, src.height);
+    const d = img.data;
+    const cut = g * 70;
+    const span = 255 - cut || 1;
+    for (let j = 0; j < d.length; j += 4) {
+      const l = (d[j] + d[j + 1] + d[j + 2]) / 3;
+      d[j + 3] = Math.max(0, (l - cut) * 255 / span);
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  function applyGhost() {
+    for (let i = 0; i < originals.length; i++) ghostSlice(i);
+  }
+
+  function paint() {
+    if (!slices.length) return;
+    const now = Math.round(t);
+    const present = P.present / 100;
+    const pN = P.pastNear / 100, pF = P.pastFar / 100;
+    const fN = P.futureNear / 100, fF = P.futureFar / 100;
+    const sigP = 30 + P.trail * 5;
+    const sigF = 12 + P.trail * 1.6;
+    for (let i = 0; i < N; i++) {
+      const d = i - t;
+      let o = present;
+      if (i !== now) {
+        o = d < 0
+          ? pF + (pN - pF) * Math.exp(-(d * d) / sigP)
+          : fF + (fN - fF) * Math.exp(-(d * d) / sigF);
+      }
+      slices[i].style.opacity = Math.max(0, o);
+      slices[i].classList.toggle('now', i === now);
+    }
+    marker.style.left = (t / (N - 1) * 100) + '%';
+    if (Math.abs(P.now - t) > 0.05) setSlider('now', t);
+  }
+
+  function orient() {
+    cube.style.transform = `rotateX(${rx}deg) rotateY(${ry}deg)`;
+  }
+
+  async function load(src) {
+    const me = ++job;
+    status.textContent = 'loading…';
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'auto';
+    video.src = src;
+    video.onerror = () => { if (me === job) status.textContent = 'could not load video, drop one here'; };
+    await once(video, 'loadedmetadata');
+    if (me !== job) return;
+    if (!isFinite(video.duration)) { video.currentTime = 1e6; await once(video, 'seeked'); }
+    const dur = video.duration;
+
+    build(video.videoWidth / video.videoHeight);
+    for (let i = 0; i < N; i++) {
+      video.currentTime = dur * (i + 0.5) / N;
+      await once(video, 'seeked');
+      if (me !== job) return;
+      slices[i].getContext('2d').drawImage(video, 0, 0, slices[i].width, slices[i].height);
+      capture(i);
+      status.textContent = `slicing ${i + 1} / ${N}`;
+    }
+    status.textContent = '';
+  }
+
+  async function webcam() {
+    const me = ++job;
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640 }, audio: false });
+    } catch (err) {
+      status.textContent = 'webcam blocked (needs https or localhost)';
+      return;
+    }
+    const cam = document.createElement('video');
+    cam.srcObject = stream;
+    cam.muted = true;
+    cam.playsInline = true;
+    await cam.play();
+    build(cam.videoWidth / cam.videoHeight);
+
+    const SECS = 3;
+    for (let i = 0; i < N && me === job; i++) {
+      await new Promise(r => setTimeout(r, SECS * 1000 / N));
+      const c = slices[i];
+      const ctx = c.getContext('2d');
+      ctx.save();
+      ctx.translate(c.width, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(cam, 0, 0, c.width, c.height);
+      ctx.restore();
+      capture(i);
+      t = i;
+      paint();
+      status.textContent = `recording ${(i / N * SECS).toFixed(1)}s`;
+    }
+    stream.getTracks().forEach(tr => tr.stop());
+    status.textContent = '';
+  }
+
+  const onChrome = e => e.target instanceof Element && e.target.closest('button, .panel, .ui');
+
+  let drag = null;
+  addEventListener('pointerdown', e => {
+    if (onChrome(e)) return;
+    drag = { x: e.clientX, y: e.clientY };
+    document.body.classList.add('dragging');
+  });
+  addEventListener('pointermove', e => {
+    if (!drag) return;
+    ry += (e.clientX - drag.x) * 0.4;
+    rx = clamp(rx - (e.clientY - drag.y) * 0.4, -89, 89);
+    drag = { x: e.clientX, y: e.clientY };
+    orient();
+  });
+  addEventListener('pointerup', () => { drag = null; document.body.classList.remove('dragging'); });
+
+  addEventListener('wheel', e => {
+    if (onChrome(e)) return;
+    e.preventDefault();
+    t = clamp(t + e.deltaY * 0.02, 0, N - 1);
+    paint();
+  }, { passive: false });
+
+  addEventListener('keydown', e => {
+    if (e.target instanceof HTMLInputElement) return;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { t = clamp(Math.round(t) - 1, 0, N - 1); paint(); }
+    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { t = clamp(Math.round(t) + 1, 0, N - 1); paint(); }
+  });
+
+  addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('over'); });
+  addEventListener('dragleave', () => document.body.classList.remove('over'));
+  addEventListener('drop', e => {
+    e.preventDefault();
+    document.body.classList.remove('over');
+    const f = e.dataTransfer.files[0];
+    if (f && f.type.startsWith('video/')) load(URL.createObjectURL(f));
+  });
+  addEventListener('resize', layout);
+
+  const fileInput = document.getElementById('file');
+  document.getElementById('open').onclick = () => fileInput.click();
+  fileInput.onchange = () => { if (fileInput.files[0]) load(URL.createObjectURL(fileInput.files[0])); };
+  document.getElementById('cam').onclick = webcam;
+
+  const here = location.pathname;
+  const dir = here.endsWith('/') ? here : /\/[^/]+\.[^/]+$/.test(here) ? here.replace(/\/[^/]+$/, '/') : here + '/';
+  load(dir + 'vid.mp4');
+  </script>
+</body>
+</html>

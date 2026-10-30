@@ -129,84 +129,44 @@
   }
 
   // ─── Audio ────────────────────────────────────────────────────────────────
-  let audioCtx, masterGain, reverbNode, voice = null;
+  // Drone follows poke (depth → delay send). Nucleus hits = detent + watery pluck.
+  let voice = null;
   let activeVoices = 0;
   let depthSmoothed = 0, roughSmoothed = 0;
 
   function initAudio() {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    audioCtx.resume();
-
-    const warmth = audioCtx.createBiquadFilter();
-    warmth.type = 'lowpass'; warmth.frequency.value = 4200; warmth.Q.value = 0.5;
-    warmth.connect(audioCtx.destination);
-
-    masterGain = audioCtx.createGain();
-    masterGain.gain.value = 0.28;
-    masterGain.connect(warmth);
-
-    const sr = audioCtx.sampleRate;
-    const len = Math.floor(sr * 1.8);
-    const buf = audioCtx.createBuffer(2, len, sr);
-    for (let c = 0; c < 2; c++) {
-      const ch = buf.getChannelData(c);
-      for (let i = 0; i < len; i++)
-        ch[i] = (Math.random()*2 - 1) * Math.pow(1 - i/len, 2.0);
-    }
-    reverbNode = audioCtx.createConvolver();
-    reverbNode.buffer = buf;
-    const wet = audioCtx.createGain(); wet.gain.value = 0.42;
-    reverbNode.connect(wet); wet.connect(masterGain);
-
-    const osc = audioCtx.createOscillator();
-    const harm = audioCtx.createOscillator();
-    const hg = audioCtx.createGain();
-    const filt = audioCtx.createBiquadFilter();
-    const g = audioCtx.createGain();
+    Audio.init({
+      master: 0.28, warmth: 4200,
+      reverb: 0.40, reverbSecs: 1.8, reverbDecay: 2.0,
+      delay: 0.10, delayTime: 0.24, delayFeedback: 0.38,
+    });
+    const c = Audio.ctx;
+    const osc = c.createOscillator();
+    const harm = c.createOscillator();
+    const hg = c.createGain();
+    const filt = c.createBiquadFilter();
+    const g = c.createGain();
     osc.type = 'sine'; osc.frequency.value = 196;
     harm.type = 'sine'; harm.frequency.value = 392;
     hg.gain.value = 0.05;
     filt.type = 'lowpass'; filt.frequency.value = 720; filt.Q.value = 1.1;
     g.gain.value = 0.0001;
     osc.connect(filt); harm.connect(hg); hg.connect(filt);
-    filt.connect(g); g.connect(masterGain); g.connect(reverbNode);
+    filt.connect(g); Audio.out(g);
     osc.start(); harm.start();
     voice = { osc, harm, hg, filt, g };
-
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && audioCtx.state === 'suspended') audioCtx.resume();
-    });
-    window.addEventListener('pageshow', () => {
-      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-    });
   }
 
-  function playNote(midi, vol = 0.12, dur = 0.8) {
-    if (!audioCtx || activeVoices >= 8) return;
-    if (audioCtx.state === 'suspended') audioCtx.resume();
-    const freq = 440 * Math.pow(2, (midi - 69) / 12);
-    const now  = audioCtx.currentTime;
+  function playNote(midi, vol = 0.12, dur = 0.8, hit = false) {
+    if (!Audio.ready() || activeVoices >= 8) return;
+    Audio.resume();
     activeVoices++;
     setTimeout(() => activeVoices--, (dur + 0.2) * 1000);
-
-    const osc   = audioCtx.createOscillator();
-    const third = audioCtx.createOscillator();
-    const thirdG = audioCtx.createGain();
-    const env   = audioCtx.createGain();
-
-    osc.type = 'sine'; osc.frequency.value = freq;
-    third.type = 'sine'; third.frequency.value = freq * 3;
-    thirdG.gain.value = 0.04;
-    third.connect(thirdG); thirdG.connect(env);
-
-    env.gain.setValueAtTime(0.0001, now);
-    env.gain.linearRampToValueAtTime(vol, now + 0.045);
-    env.gain.exponentialRampToValueAtTime(vol * 0.42, now + 0.22);
-    env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-
-    osc.connect(env); env.connect(masterGain); env.connect(reverbNode);
-    osc.start(now); third.start(now);
-    osc.stop(now + dur + 0.1); third.stop(now + dur + 0.1);
+    if (hit) Audio.tick({ vol: Math.min(0.16, vol * 1.2), dur: 0.01, hp: 1200 });
+    Audio.tone({
+      midi, vol, attack: 0.04, decay: dur, harm: 0.04,
+      filtOpen: 2800, filtClose: 380, filtTime: 0.18,
+    });
   }
 
   // ─── Blob physics (Verlet soft-body) ──────────────────────────────────────
@@ -661,7 +621,7 @@
           nuc.vx -= 2*dot*bestNx * mode.bounce;
           nuc.vy -= 2*dot*bestNy * mode.bounce;
           if (impact > 0.35 && nuc.cooldown <= 0 && bestCp) {
-            playNote(nuc.midi, Math.min(0.12, 0.03 + impact*0.02), 0.6);
+            playNote(nuc.midi, Math.min(0.12, 0.03 + impact*0.02), 0.6, true);
             nuc.flash = 22; nuc.cooldown = 20;
             wallFlashes.push({x:bestCp.x, y:bestCp.y, hue:nuc.hue, life:44, maxLife:44});
             spawnEdgeWave(bestCp.x, bestCp.y, nuc.hue, 4 + Math.min(6, impact*1.8));
@@ -686,7 +646,7 @@
         const vel = Math.abs(dot);
         if (vel > 0.18 && nuc.cooldown <= 0) {
           const loud = vel > 0.9;
-          playNote(nuc.midi, loud ? Math.min(0.13, 0.055 + vel*0.03) : 0.032 + vel*0.018, loud ? 1.1 : 0.7);
+          playNote(nuc.midi, loud ? Math.min(0.13, 0.055 + vel*0.03) : 0.032 + vel*0.018, loud ? 1.1 : 0.7, loud);
           nuc.flash    = 26;
           nuc.cooldown = 36;
           if (bestCp) {
@@ -1351,11 +1311,11 @@
       depthSmoothed += ((contact * 0.7 + well * 0.55) - depthSmoothed) * (1 - Math.exp(-dt / 0.11));
     }
 
-    if (voice && audioCtx) {
-      const now = audioCtx.currentTime;
+    if (voice && Audio.ready()) {
+      const now = Audio.now();
       const held = pointerDown;
       const midi = Audio.noteFromY(my, H, 'wholeTone', 2, 62);
-      const freq = 440 * Math.pow(2, (midi - 69) / 12);
+      const freq = Audio.freq(midi);
       voice.osc.frequency.setTargetAtTime(freq, now, 0.09);
       voice.harm.frequency.setTargetAtTime(freq * (2.01 + roughSmoothed * 0.9), now, 0.11);
       voice.hg.gain.setTargetAtTime(0.04 + roughSmoothed * 0.35 + stir * 0.08, now, 0.12);
@@ -1363,6 +1323,7 @@
       voice.filt.Q.setTargetAtTime(0.85 + depthSmoothed * 1.3 + roughSmoothed * 2.0, now, 0.14);
       const amp = held ? 0.028 + depthSmoothed * 0.06 : 0.005 + depthSmoothed * 0.016 + hover * 0.008;
       voice.g.gain.setTargetAtTime(amp, now, held ? 0.07 : 0.32);
+      Audio.setDelay(0.08 + depthSmoothed * 0.22 + roughSmoothed * 0.18, 0.12);
     }
 
     if (blbs.length && !reduceMotion) {

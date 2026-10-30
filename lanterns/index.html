@@ -41,49 +41,29 @@
     ctx.scale(dpr, dpr);
   }
 
-  let audioCtx, masterGain, reverbNode, voices = 0;
+  let voices = 0;
 
   function initAudio() {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    audioCtx.resume();
-    const warmth = audioCtx.createBiquadFilter();
-    warmth.type = 'lowpass'; warmth.frequency.value = 3800; warmth.Q.value = 0.45;
-    warmth.connect(audioCtx.destination);
-    masterGain = audioCtx.createGain();
-    masterGain.gain.value = 0.32;
-    masterGain.connect(warmth);
-    const sr = audioCtx.sampleRate, len = Math.floor(sr * 2.1);
-    const buf = audioCtx.createBuffer(2, len, sr);
-    for (let c = 0; c < 2; c++) {
-      const ch = buf.getChannelData(c);
-      for (let i = 0; i < len; i++) ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.1);
-    }
-    reverbNode = audioCtx.createConvolver();
-    reverbNode.buffer = buf;
-    const wet = audioCtx.createGain(); wet.gain.value = 0.55;
-    reverbNode.connect(wet); wet.connect(masterGain);
+    Audio.init({
+      master: 0.30, warmth: 3800, warmthQ: 0.45,
+      reverb: 0.50, reverbSecs: 2.1, reverbDecay: 2.1,
+      delay: 0.16, delayTime: 0.22, delayFeedback: 0.30,
+    });
   }
 
   function playNote(midi, vol = 0.14, dur = 1.35) {
-    if (!audioCtx || voices >= 10) return;
-    if (audioCtx.state === 'suspended') audioCtx.resume();
-    const freq = 440 * Math.pow(2, (midi - 69) / 12);
-    const now = audioCtx.currentTime;
+    if (!Audio.ready() || voices >= 10) return;
+    Audio.resume();
     voices++; setTimeout(() => voices--, (dur + 0.2) * 1000);
-    const osc = audioCtx.createOscillator();
-    const fifth = audioCtx.createOscillator();
-    const g5 = audioCtx.createGain(); g5.gain.value = 0.12;
-    const env = audioCtx.createGain();
-    osc.type = 'sine'; osc.frequency.value = freq;
-    fifth.type = 'triangle'; fifth.frequency.value = freq * 2;
-    fifth.connect(g5); g5.connect(env);
-    env.gain.setValueAtTime(0.0001, now);
-    env.gain.linearRampToValueAtTime(vol, now + 0.04);
-    env.gain.exponentialRampToValueAtTime(vol * 0.38, now + 0.28);
-    env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-    osc.connect(env); env.connect(masterGain); env.connect(reverbNode);
-    osc.start(now); fifth.start(now);
-    osc.stop(now + dur + 0.05); fifth.stop(now + dur + 0.05);
+    Audio.tone({
+      midi, vol, attack: 0.04, decay: dur, oct: 0.12,
+      filtOpen: 3200, filtClose: 420, filtTime: 0.28,
+    });
+  }
+
+  function playFlash(midi) {
+    Audio.tick({ vol: 0.12, dur: 0.01, hp: 2100 });
+    Audio.ping({ freq: Audio.freq(midi) * 2, q: 16, vol: 2.0, decay: 0.18 });
   }
 
   const SCALE = [60, 64, 67, 72];
@@ -124,13 +104,20 @@
 
   function fireLantern(L, now, slipped) {
     L.bloom = 1;
+    playFlash(L.midi);
     playNote(L.midi, slipped ? 0.18 : 0.11, slipped ? 1.5 : 1.2);
     lastFires.push({ t: now, midi: L.midi, x: L.x, y: L.y, hue: L.hue });
     lastFires = lastFires.filter(f => now - f.t < 220);
     const others = lastFires.filter(f => f !== lastFires.at(-1));
     if (others.length) {
-      playNote(L.midi + 7, 0.16, 1.8);
-      playNote(others[0].midi, 0.10, 1.6);
+      Audio.tone({
+        midi: L.midi + 7, vol: 0.14, attack: 0.03, decay: 1.6, oct: 0.08,
+        filtOpen: 2800, filtClose: 360, at: 0.06,
+      });
+      Audio.tone({
+        midi: others[0].midi, vol: 0.10, attack: 0.04, decay: 1.5,
+        filtOpen: 2400, filtClose: 320, at: 0.12,
+      });
       chords.push({
         ax: others[0].x, ay: others[0].y,
         bx: L.x, by: L.y,

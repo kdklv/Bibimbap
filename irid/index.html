@@ -39,51 +39,31 @@
     ctx.scale(dpr, dpr);
   }
 
-  let audioCtx, masterGain, reverbNode, voice = null;
+  let voice = null;
   let currentScale = 'wholeTone';
+  let lastPingAt = 0;
 
   function initAudio() {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    audioCtx.resume();
-    const warmth = audioCtx.createBiquadFilter();
-    warmth.type = 'lowpass'; warmth.frequency.value = 3400; warmth.Q.value = 0.55;
-    warmth.connect(audioCtx.destination);
-    masterGain = audioCtx.createGain();
-    masterGain.gain.value = 0.28;
-    masterGain.connect(warmth);
-
-    const sr = audioCtx.sampleRate, len = Math.floor(sr * 3.1);
-    const buf = audioCtx.createBuffer(2, len, sr);
-    for (let c = 0; c < 2; c++) {
-      const ch = buf.getChannelData(c);
-      for (let i = 0; i < len; i++) ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.45);
-    }
-    reverbNode = audioCtx.createConvolver();
-    reverbNode.buffer = buf;
-    const wet = audioCtx.createGain(); wet.gain.value = 0.72;
-    reverbNode.connect(wet); wet.connect(masterGain);
-
-    const osc = audioCtx.createOscillator();
-    const harm = audioCtx.createOscillator();
-    const hg = audioCtx.createGain();
-    const filt = audioCtx.createBiquadFilter();
-    const g = audioCtx.createGain();
+    Audio.init({
+      master: 0.26, warmth: 3400, warmthQ: 0.55,
+      reverb: 0.62, reverbSecs: 3.1, reverbDecay: 2.45,
+      delay: 0.12, delayTime: 0.26, delayFeedback: 0.34,
+    });
+    const c = Audio.ctx;
+    const osc = c.createOscillator();
+    const harm = c.createOscillator();
+    const hg = c.createGain();
+    const filt = c.createBiquadFilter();
+    const g = c.createGain();
     osc.type = 'sine'; osc.frequency.value = 196;
     harm.type = 'sine'; harm.frequency.value = 392;
     hg.gain.value = 0.05;
     filt.type = 'lowpass'; filt.frequency.value = 880; filt.Q.value = 1.4;
     g.gain.value = 0.0001;
     osc.connect(filt); harm.connect(hg); hg.connect(filt);
-    filt.connect(g); g.connect(masterGain); g.connect(reverbNode);
+    filt.connect(g); Audio.out(g);
     osc.start(); harm.start();
     voice = { osc, harm, hg, filt, g };
-
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && audioCtx.state === 'suspended') audioCtx.resume();
-    });
-    window.addEventListener('pageshow', () => {
-      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-    });
   }
 
   const N = 44;
@@ -277,14 +257,14 @@
     depthSmoothed += (-minH - depthSmoothed) * (1 - Math.exp(-dt / 0.09));
     roughSmoothed += (Math.sqrt(variance) - roughSmoothed) * (1 - Math.exp(-dt / 0.12));
 
-    if (voice && audioCtx) {
-      const now = audioCtx.currentTime;
+    if (voice && Audio.ready()) {
+      const now = Audio.now();
       const held = pointers.size > 0;
       const midi = Audio.noteFromY(
         cy + (0.5 - depthSmoothed * 0.35) * H * 0.4,
         H, currentScale, 2, 64
       );
-      const freq = 440 * Math.pow(2, (midi - 69) / 12);
+      const freq = Audio.freq(midi);
       voice.osc.frequency.setTargetAtTime(freq, now, 0.07);
       voice.harm.frequency.setTargetAtTime(freq * (2.02 + roughSmoothed * 1.2), now, 0.09);
       voice.hg.gain.setTargetAtTime(0.04 + roughSmoothed * 0.5, now, 0.1);
@@ -292,6 +272,7 @@
       voice.filt.Q.setTargetAtTime(0.9 + roughSmoothed * 3.4, now, 0.12);
       const amp = held ? 0.035 + depthSmoothed * 0.08 : 0.007 + roughSmoothed * 0.045;
       voice.g.gain.setTargetAtTime(amp, now, held ? 0.06 : 0.28);
+      Audio.setDelay(0.10 + roughSmoothed * 0.28 + depthSmoothed * 0.12, 0.10);
     }
   }
 
@@ -395,6 +376,12 @@
       if (!inBlob(x, y, 10)) return;
       canvas.setPointerCapture(e.pointerId);
       pointers.set(e.pointerId, { x, y, depth: 0.12 });
+      const tnow = performance.now();
+      if (tnow - lastPingAt > 90) {
+        lastPingAt = tnow;
+        const midi = Audio.noteFromY(y, H, currentScale, 2, 64);
+        Audio.ping({ freq: Audio.freq(midi) * 2.2, q: 18, vol: 2.6, decay: 0.22 });
+      }
     });
     canvas.addEventListener('pointermove', e => {
       const p = pointers.get(e.pointerId);
@@ -434,6 +421,9 @@
     if (inBlob(x, y, 10)) {
       canvas.setPointerCapture(e.pointerId);
       pointers.set(e.pointerId, { x, y, depth: 0.12 });
+      lastPingAt = performance.now();
+      const midi = Audio.noteFromY(y, H, currentScale, 2, 64);
+      Audio.ping({ freq: Audio.freq(midi) * 2.2, q: 18, vol: 2.6, decay: 0.22 });
     }
     const beginEl = document.getElementById('begin');
     beginEl.style.opacity = '0';

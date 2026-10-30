@@ -32,72 +32,35 @@
     ctx.scale(dpr, dpr);
   }
 
-  let audioCtx, masterGain, reverbNode, drone = null, voices = 0;
+  let drone = null;
   let currentScale = 'pentatonic';
 
   function initAudio() {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    audioCtx.resume();
-    const warmth = audioCtx.createBiquadFilter();
-    warmth.type = 'lowpass'; warmth.frequency.value = 2800; warmth.Q.value = 0.38;
-    warmth.connect(audioCtx.destination);
-    masterGain = audioCtx.createGain();
-    masterGain.gain.value = 0.30;
-    masterGain.connect(warmth);
-
-    const sr = audioCtx.sampleRate, len = Math.floor(sr * 2.6);
-    const buf = audioCtx.createBuffer(2, len, sr);
-    for (let c = 0; c < 2; c++) {
-      const ch = buf.getChannelData(c);
-      for (let i = 0; i < len; i++) ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.25);
-    }
-    reverbNode = audioCtx.createConvolver();
-    reverbNode.buffer = buf;
-    const wet = audioCtx.createGain(); wet.gain.value = 0.62;
-    reverbNode.connect(wet); wet.connect(masterGain);
-
-    const oscA = audioCtx.createOscillator();
-    const oscB = audioCtx.createOscillator();
-    const oscC = audioCtx.createOscillator();
-    const gB = audioCtx.createGain(); gB.gain.value = 0.22;
-    const gC = audioCtx.createGain(); gC.gain.value = 0.08;
-    const filt = audioCtx.createBiquadFilter();
-    const g = audioCtx.createGain();
-    oscA.type = 'sine';     oscA.frequency.value = 98;
-    oscB.type = 'sine';     oscB.frequency.value = 147;
-    oscC.type = 'triangle'; oscC.frequency.value = 196;
-    filt.type = 'lowpass';  filt.frequency.value = 260; filt.Q.value = 0.65;
+    Audio.init({
+      master: 0.26, warmth: 2400, warmthQ: 0.4,
+      reverb: 0.42, reverbSecs: 2.8, reverbDecay: 2.4,
+      delay: 0.08, delayTime: 0.34, delayFeedback: 0.22,
+      chorus: 0.12, bed: 0,
+    });
+    const c = Audio.ctx;
+    const osc = c.createOscillator();
+    const filt = c.createBiquadFilter();
+    const g = c.createGain();
+    osc.type = 'sine'; osc.frequency.value = 73;
+    filt.type = 'lowpass'; filt.frequency.value = 140; filt.Q.value = 0.5;
     g.gain.value = 0.0001;
-    oscA.connect(filt);
-    oscB.connect(gB); gB.connect(filt);
-    oscC.connect(gC); gC.connect(filt);
-    filt.connect(g); g.connect(masterGain); g.connect(reverbNode);
-    oscA.start(); oscB.start(); oscC.start();
-    drone = { oscA, oscB, oscC, filt, g };
-
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && audioCtx.state === 'suspended') audioCtx.resume();
-    });
-    window.addEventListener('pageshow', () => {
-      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-    });
+    osc.connect(filt); filt.connect(g); Audio.outDry(g);
+    osc.start();
+    drone = { osc, filt, g };
   }
 
-  function playPluck(midi, vol = 0.06) {
-    if (!audioCtx || voices >= 9) return;
-    if (audioCtx.state === 'suspended') audioCtx.resume();
-    const freq = 440 * Math.pow(2, (midi - 69) / 12);
-    const now = audioCtx.currentTime;
-    voices++; setTimeout(() => voices--, 1000);
-    const osc = audioCtx.createOscillator();
-    const env = audioCtx.createGain();
-    osc.type = 'sine'; osc.frequency.value = freq;
-    env.gain.setValueAtTime(0.0001, now);
-    env.gain.linearRampToValueAtTime(vol * 0.85, now + 0.04);
-    env.gain.exponentialRampToValueAtTime(vol * 0.28, now + 0.22);
-    env.gain.exponentialRampToValueAtTime(0.0001, now + 1.05);
-    osc.connect(env); env.connect(masterGain); env.connect(reverbNode);
-    osc.start(now); osc.stop(now + 1.1);
+  function playPluck(midi, vol = 0.04) {
+    if (!Audio.ready()) return;
+    Audio.resume();
+    Audio.tone({
+      midi, vol, attack: 0.025, decay: 0.42,
+      filtOpen: 1500, filtClose: 720, filtTime: 0.28, filtQ: 0.65,
+    });
   }
 
   const SEG = 5;
@@ -541,6 +504,7 @@
     }
 
     let bentSum = 0, bentN = 0;
+    let pluckHair = null, pluckCurve = 0;
     const follow = mode.follow * (1 - settle * 0.95);
     const neighborK = mode.neighbor * (1 - settle * 0.7);
     const spring = mode.spring * (1 + settle * 2.8);
@@ -617,26 +581,26 @@
       bentSum += curve; bentN++;
       if (curve > 0.55 && !h.bentFlag) {
         h.bentFlag = true;
-        if (clock - lastPluckAt > 0.08) {
-          const midi = Audio.noteFromY(h.y, H, currentScale, 2, 62);
-          playPluck(midi, 0.034 + Math.min(0.05, curve * 0.05));
-          lastPluckAt = clock;
-        }
+        if (curve > pluckCurve) { pluckCurve = curve; pluckHair = h; }
       } else if (curve < 0.22) {
         h.bentFlag = false;
       }
     }
 
+    if (pluckHair && clock - lastPluckAt > 0.18) {
+      const midi = Audio.noteFromY(pluckHair.y, H, currentScale, 2, 57);
+      playPluck(midi, 0.028 + Math.min(0.03, pluckCurve * 0.03));
+      lastPluckAt = clock;
+    }
+
     const avg = bentN ? bentSum / bentN : 0;
     bentSmoothed += (avg - bentSmoothed) * (1 - Math.exp(-dt / 0.2));
-    if (drone && audioCtx) {
-      const now = audioCtx.currentTime;
+    if (drone && Audio.ready()) {
+      const now = Audio.now();
       const open = Math.min(1, bentSmoothed / 0.52);
-      drone.filt.frequency.setTargetAtTime(180 + open * 1400, now, 0.14);
-      drone.g.gain.setTargetAtTime(0.008 + open * 0.07, now, 0.16);
-      drone.oscA.frequency.setTargetAtTime(92 + open * 22, now, 0.22);
-      drone.oscB.frequency.setTargetAtTime(138 + open * 34, now, 0.22);
-      drone.oscC.frequency.setTargetAtTime(184 + open * 48, now, 0.22);
+      drone.filt.frequency.setTargetAtTime(120 + open * 760, now, 0.18);
+      drone.g.gain.setTargetAtTime(0.006 + open * 0.038, now, 0.2);
+      drone.osc.frequency.setTargetAtTime(70 + open * 8, now, 0.28);
     }
   }
 

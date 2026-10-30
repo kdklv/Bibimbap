@@ -170,58 +170,35 @@
     let lastInputAt  = 0;
     let hint         = null; // ghost that traces a hidden loop when the grid is left alone
 
-    // ─── Audio (Web Audio API — works reliably on iOS) ───────────────────────
-    let audioCtx  = null;
-    let convolver = null;
-    let masterOut = null;
-
+    // ─── Audio ───────────────────────────────────────────────────────────────
+    // Cell crossing = spinner detent (tick + filter-close). Loop lap = two-note motif.
     function initAudio() {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      audioCtx.resume();   // fire-and-forget within gesture — satisfies iOS policy
-
-      masterOut = audioCtx.createGain();
-      masterOut.gain.value = 0.72;
-      masterOut.connect(audioCtx.destination);
-
-      // Programmatic reverb impulse response
-      const sr  = audioCtx.sampleRate;
-      const len = Math.floor(sr * 2.4);
-      const buf = audioCtx.createBuffer(2, len, sr);
-      for (let c = 0; c < 2; c++) {
-        const ch = buf.getChannelData(c);
-        for (let i = 0; i < len; i++)
-          ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.2);
-      }
-      convolver = audioCtx.createConvolver();
-      convolver.buffer = buf;
-      const wet = audioCtx.createGain();
-      wet.gain.value = 0.38;
-      convolver.connect(wet);
-      wet.connect(masterOut);
-    }
-
-    function playNote(midi, attack, decay, vol) {
-      if (!audioCtx) return;
-      if (audioCtx.state === 'suspended') audioCtx.resume();
-      const freq = 440 * Math.pow(2, (midi - 69) / 12);
-      const osc  = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      const t = audioCtx.currentTime;
-      gain.gain.setValueAtTime(0.0001, t);
-      gain.gain.linearRampToValueAtTime(vol, t + attack);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t + attack + decay);
-      osc.connect(gain);
-      gain.connect(masterOut);
-      gain.connect(convolver);
-      osc.start(t);
-      osc.stop(t + attack + decay + 0.1);
+      Audio.init({
+        master: 0.68, warmth: 4200,
+        reverb: 0.36, reverbSecs: 2.4, reverbDecay: 2.2,
+        delay: 0.20, delayTime: 0.25, delayFeedback: 0.32,
+      });
     }
 
     function triggerNote(p) {
       const midi = Audio.noteFromY(p.row * CELL, ROWS * CELL, currentScale, 3);
-      playNote(midi, 0.04, 0.4, 0.28);
+      Audio.tick({ vol: 0.07, dur: 0.006, hp: 2600 });
+      Audio.tone({
+        midi, vol: 0.26, attack: 0.012, decay: 0.40,
+        filtOpen: 3800, filtClose: 520, filtTime: 0.16, filtQ: 1.3,
+      });
+    }
+
+    function playLap(p) {
+      const midi = Audio.noteFromY(p.row * CELL, ROWS * CELL, currentScale, 3);
+      Audio.tone({
+        midi, vol: 0.18, attack: 0.02, decay: 0.72,
+        filtOpen: 2600, filtClose: 280, filtTime: 0.42,
+      });
+      Audio.tone({
+        midi: midi + 7, vol: 0.11, attack: 0.02, decay: 0.55,
+        filtOpen: 3400, filtClose: 420, at: 0.09,
+      });
     }
 
     // Determine the next move for a plankton that just arrived at p.col/p.row.
@@ -259,6 +236,7 @@
       }
       if (p.loopMoveTarget !== null && p.totalMoves >= p.loopMoveTarget) {
         p.state = 'fading';
+        playLap(p);
         return;
       }
 
@@ -830,15 +808,6 @@
 
     function begin() {
       initAudio();
-
-      // Re-resume after iOS background suspension
-      document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && audioCtx && audioCtx.state === 'suspended')
-          audioCtx.resume();
-      });
-      window.addEventListener('pageshow', () => {
-        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-      });
 
       beginEl.style.opacity = '0';
       beginEl.style.pointerEvents = 'none';

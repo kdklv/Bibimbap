@@ -30,50 +30,22 @@
     let currentScale = 'pentatonic';
 
     // ─── Audio ────────────────────────────────────────────────────────────────
-    let audioCtx = null, masterOut = null, convolver = null;
-
+    // Creature walk = vibrato sine in a delay room. Tap / scare = detent tick.
     function initAudio() {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      audioCtx.resume();
-      masterOut = audioCtx.createGain();
-      masterOut.gain.value = 0.45;
-      masterOut.connect(audioCtx.destination);
-      const sr = audioCtx.sampleRate, len = Math.floor(sr * 3.5);
-      const buf = audioCtx.createBuffer(2, len, sr);
-      for (let c = 0; c < 2; c++) {
-        const ch = buf.getChannelData(c);
-        for (let i = 0; i < len; i++)
-          ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 1.4);
-      }
-      convolver = audioCtx.createConvolver();
-      convolver.buffer = buf;
-      const wet = audioCtx.createGain();
-      wet.gain.value = 0.44;
-      convolver.connect(wet); wet.connect(masterOut);
+      Audio.init({
+        master: 0.42, warmth: 3600,
+        reverb: 0.42, reverbSecs: 3.2, reverbDecay: 1.5,
+        delay: 0.16, delayTime: 0.28, delayFeedback: 0.36,
+      });
     }
 
     function playNote(midi, vol, dur = 2.6) {
-      if (!audioCtx) return;
-      if (audioCtx.state === 'suspended') audioCtx.resume();
-      const freq = 440 * Math.pow(2, (midi - 69) / 12);
-      const now  = audioCtx.currentTime;
-      const osc1 = audioCtx.createOscillator();
-      const osc2 = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      const g2   = audioCtx.createGain();
-      const lfo  = audioCtx.createOscillator();
-      const lg   = audioCtx.createGain();
-      lfo.frequency.value = 4.5; lg.gain.value = freq * 0.006;
-      lfo.connect(lg); lg.connect(osc1.frequency);
-      osc1.type = 'sine'; osc1.frequency.value = freq;
-      osc2.type = 'sine'; osc2.frequency.value = freq * 1.5; g2.gain.value = 0.12;
-      osc1.connect(gain); osc2.connect(g2); g2.connect(gain);
-      gain.gain.setValueAtTime(0.0001, now);
-      gain.gain.linearRampToValueAtTime(vol, now + 0.10);
-      gain.gain.setTargetAtTime(vol * 0.2, now + 0.10, 0.55);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-      gain.connect(masterOut); gain.connect(convolver);
-      [osc1, osc2, lfo].forEach(o => { o.start(now); o.stop(now + dur + 0.1); });
+      Audio.tone({
+        midi, vol, attack: 0.10, decay: dur,
+        partial: 1.5, partialGain: 0.12,
+        filtOpen: 2400, filtClose: 360, filtTime: dur * 0.45,
+        lfoHz: 4.5, lfoDepth: 0.006,
+      });
     }
 
     // ─── Path ─────────────────────────────────────────────────────────────────
@@ -519,6 +491,7 @@
         m.vx += (dx / d) * 1.2;
         m.vy += (dy / d) * 1.2;
       }
+      Audio.tick({ vol: 0.10, dur: 0.008, hp: 1900 });
       playNote(Audio.noteFromY(p.y, H, currentScale, 2), 0.10, 0.7);
     }
 
@@ -537,6 +510,7 @@
           f.sy = (dy / d) * 12;
         }
       }
+      Audio.tick({ vol: 0.14, dur: 0.012, hp: 1400 });
       playNote(Audio.noteFromY(p.y, H, currentScale, 2), 0.12, 0.5);
     }
 
@@ -644,15 +618,6 @@
     const beginEl = document.getElementById('begin');
     function begin() {
       initAudio();
-
-      // Re-resume after iOS background suspension
-      document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && audioCtx && audioCtx.state === 'suspended')
-          audioCtx.resume();
-      });
-      window.addEventListener('pageshow', () => {
-        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-      });
 
       beginEl.style.opacity = '0'; beginEl.style.pointerEvents = 'none';
       setTimeout(() => beginEl.remove(), 700);

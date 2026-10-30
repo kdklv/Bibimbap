@@ -144,6 +144,7 @@
         f.vy -= ny * 1.15;
         f.dartFrames = 12;
         f.glow = 1;
+        enqueueChirp(f);
       }
     }
 
@@ -231,11 +232,16 @@
         trail: [],
         dartFrames: 0,
         glow: 0,
+        voice: 0,
       };
     }
 
     function initFish() {
-      fish = Array.from({ length: fishCount() }, () => makeFish());
+      fish = Array.from({ length: fishCount() }, (_, i) => {
+        const f = makeFish();
+        f.voice = i % 10; // stable in-scale degree; the fish keeps its chime
+        return f;
+      });
     }
 
     function scatterFish() {
@@ -255,95 +261,58 @@
     }
 
     // ─── Audio ────────────────────────────────────────────────────────────────
-    let audioCtx = null, masterOut = null, convolver = null;
-    let activeVoices = 0;
-    const MAX_VOICES = 7;   // hard cap — prevents wall of sound
-    let lastNoteTime = 0;   // per-ripple sweep throttle
+    // Stone = low drop. Fish = their own scale degree, queued so a wave
+    // reads as an arpeggio instead of a chord slam or a one-note ping.
+    let lastChirpAt = 0;
+    let rippleMidi = 52;
+    const chirpQueue = [];
+    const chirpSet = new Set();
 
     function initAudio() {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      audioCtx.resume();
-
-      // Warm low-pass on everything — softens stacked voices
-      const warmth = audioCtx.createBiquadFilter();
-      warmth.type = 'lowpass';
-      warmth.frequency.value = 3800;
-      warmth.Q.value = 0.5;
-      warmth.connect(audioCtx.destination);
-
-      masterOut = audioCtx.createGain();
-      masterOut.gain.value = 0.30;
-      masterOut.connect(warmth);
-
-      // Short, airy reverb — space without mud
-      const sr  = audioCtx.sampleRate;
-      const len = Math.floor(sr * 1.8);
-      const buf = audioCtx.createBuffer(2, len, sr);
-      for (let c = 0; c < 2; c++) {
-        const ch = buf.getChannelData(c);
-        for (let i = 0; i < len; i++)
-          ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.0);
-      }
-      convolver = audioCtx.createConvolver();
-      convolver.buffer = buf;
-      const wet = audioCtx.createGain();
-      wet.gain.value = 0.38;
-      convolver.connect(wet);
-      wet.connect(masterOut);
+      Audio.init({
+        master: 0.28, warmth: 3200,
+        reverb: 0.40, reverbSecs: 2.2, reverbDecay: 2.2,
+        delay: 0.13, delayTime: 0.28, delayFeedback: 0.24,
+        chorus: 0.20, bed: 0.016,
+      });
     }
 
-    // Warm tone: sine carrier + soft 3rd harmonic (adds body, not brightness)
-    // Short marimba-like decay so notes don't pile up
-    function playNote(midi, vol = 0.11, dur = 0.55) {
-      if (!audioCtx || activeVoices >= MAX_VOICES) return;
-      if (audioCtx.state === 'suspended') audioCtx.resume();
-      const freq = 440 * Math.pow(2, (midi - 69) / 12);
-      const now  = audioCtx.currentTime;
-
-      activeVoices++;
-      setTimeout(() => activeVoices--, (dur + 0.15) * 1000);
-
-      const carrier  = audioCtx.createOscillator();
-      const body     = audioCtx.createOscillator();  // 3rd harmonic = warmth
-      const bodyGain = audioCtx.createGain();
-      const env      = audioCtx.createGain();
-
-      carrier.type = 'sine';
-      carrier.frequency.value = freq;
-
-      body.type = 'sine';
-      body.frequency.value = freq * 3;   // 3rd harmonic
-      bodyGain.gain.value = 0.06;        // subtle — warms, doesn't sharpen
-      body.connect(bodyGain);
-      bodyGain.connect(env);
-
-      // Quick attack, natural decay — like a plucked string or marimba key
-      env.gain.setValueAtTime(0.0001, now);
-      env.gain.linearRampToValueAtTime(vol, now + 0.008);
-      env.gain.exponentialRampToValueAtTime(vol * 0.35, now + 0.08);
-      env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-
-      carrier.connect(env);
-      env.connect(masterOut);
-      env.connect(convolver);
-
-      carrier.start(now); body.start(now);
-      carrier.stop(now + dur + 0.1); body.stop(now + dur + 0.1);
-    }
-
-    // Ripple spawn: warm low thud + high sparkle, brief
     function playRippleNote(y) {
-      const midi = Audio.noteFromY(y, H, currentScale, 2, 52);
-      playNote(midi,     0.16, 1.0);  // root, longer
-      playNote(midi + 7, 0.10, 0.7);  // fifth
+      rippleMidi = Audio.noteFromY(y, H, currentScale, 2, 50);
+      Audio.tone({
+        midi: rippleMidi, vol: 0.09, attack: 0.05, decay: 1.2,
+        filtOpen: 1400, filtClose: 380, filtTime: 0.55, filtQ: 0.65,
+      });
     }
 
-    // Fish note: short, distinct, throttled so sweep reads as arpeggio not blur
-    function playFishNote(f) {
+    function fishMidi(f) {
+      const scale = Audio.scales[currentScale] || Audio.scales.pentatonic;
+      const deg = scale[f.voice % scale.length];
+      const fishOct = Math.floor(f.voice / scale.length) % 2;
+      const tapOct = rippleMidi >= 60 ? 12 : 0;
+      return Math.max(50, Math.min(76, 52 + deg + fishOct * 12 + tapOct));
+    }
+
+    function enqueueChirp(f) {
+      if (chirpSet.has(f) || chirpQueue.length >= 18) return;
+      chirpSet.add(f);
+      chirpQueue.push(f);
+    }
+
+    function drainChirps() {
+      if (!chirpQueue.length) return;
       const now = performance.now();
-      if (now - lastNoteTime < 80) return;
-      lastNoteTime = now;
-      playNote(Audio.noteFromY(f.y, H, currentScale, 2), 0.09, 0.42);
+      if (now - lastChirpAt < 64) return;
+      lastChirpAt = now;
+      const f = chirpQueue.shift();
+      chirpSet.delete(f);
+      Audio.tone({
+        midi: fishMidi(f),
+        vol: 0.046 + (f.size - 6) * 0.005,
+        attack: 0.014, decay: 0.52,
+        filtOpen: 1900, filtClose: 440, filtTime: 0.28, filtQ: 0.6,
+        harm: 0.03,
+      });
     }
 
     // ─── Boids ────────────────────────────────────────────────────────────────
@@ -483,7 +452,7 @@
             f.vy += Math.sin(a) * burst;
             f.dartFrames = 20 + (w * 14) | 0;
             f.glow = 1;
-            playFishNote(f);
+            enqueueChirp(f);
           }
         }
 
@@ -600,7 +569,14 @@
       drawShore();
     }
 
-    function loop() { updatePond(); updateFish(); updateRipples(); draw(); requestAnimationFrame(loop); }
+    function loop() {
+      updatePond();
+      updateFish();
+      updateRipples();
+      drainChirps();
+      draw();
+      requestAnimationFrame(loop);
+    }
 
     // ─── Input ────────────────────────────────────────────────────────────────
     function spawnRipple(x, y) {
@@ -676,13 +652,6 @@
     const beginEl = document.getElementById('begin');
     function begin() {
       initAudio();
-      document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && audioCtx && audioCtx.state === 'suspended')
-          audioCtx.resume();
-      });
-      window.addEventListener('pageshow', () => {
-        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-      });
 
       beginEl.style.opacity = '0';
       beginEl.style.pointerEvents = 'none';
